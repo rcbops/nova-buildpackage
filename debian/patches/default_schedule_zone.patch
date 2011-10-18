@@ -1,0 +1,24 @@
+--- a/nova/scheduler/zone.py
++++ b/nova/scheduler/zone.py
+@@ -25,6 +25,12 @@
+ 
+ from nova.scheduler import driver
+ from nova import db
++from nova import flags
++
++
++FLAGS = flags.FLAGS
++flags.DEFINE_string('default_schedule_zone', 'nova',
++                    'zone to use when user doesnt specify one')
+ 
+ 
+ class ZoneScheduler(driver.Scheduler):
+@@ -36,7 +42,7 @@
+         """
+ 
+         if zone is None:
+-            return self.hosts_up(context, topic)
++            zone = FLAGS.default_schedule_zone
+ 
+         services = db.service_get_all_by_topic(context, topic)
+         return [service.host

@@ -1,0 +1,32 @@
+--- a/nova/image/glance.py
++++ b/nova/image/glance.py
+@@ -70,6 +70,7 @@
+ 
+     def __init__(self, client=None):
+         self._client = client
++        self.auth_token = None
+ 
+     def _get_client(self):
+         # NOTE(sirp): we want to load balance each request across glance
+@@ -78,7 +79,9 @@
+         if self._client is not None:
+             return self._client
+         glance_host, glance_port = pick_glance_api_server()
+-        return GlanceClient(glance_host, glance_port)
++        return GlanceClient(glance_host,
++                            glance_port,
++                            auth_tok=self.auth_token)
+ 
+     def _set_client(self, client):
+         self._client = client
+@@ -87,7 +90,9 @@
+ 
+     def _set_client_context(self, context):
+         """Sets the client's auth token."""
+-        self.client.set_auth_token(context.auth_token)
++        self.auth_token = context.auth_token
++        if self._client is not None:
++            self._client.set_auth_token(self.auth_token)
+ 
+     def index(self, context, **kwargs):
+         """Calls out to Glance for a list of images available."""

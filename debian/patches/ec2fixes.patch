@@ -1,0 +1,20 @@
+--- a/nova/api/ec2/cloud.py
++++ b/nova/api/ec2/cloud.py
+@@ -821,7 +821,7 @@
+         return source_project_id
+ 
+     def create_security_group(self, context, group_name, group_description):
+-        if not re.match('^[a-zA-Z0-9_\- ]+$', str(group_name)):
++        if not re.match('^[a-zA-Z0-9_\- .]+$', str(group_name)):
+             # Some validation to ensure that values match API spec.
+             # - Alphanumeric characters, spaces, dashes, and underscores.
+             # TODO(Daviey): LP: #813685 extend beyond group_name checking, and
+@@ -1362,7 +1362,7 @@
+             user_data=kwargs.get('user_data'),
+             security_group=kwargs.get('security_group'),
+             availability_zone=kwargs.get('placement', {}).get(
+-                                  'AvailabilityZone'),
++                                  'availability_zone'),
+             block_device_mapping=kwargs.get('block_device_mapping', {}))
+         return self._format_run_instances(context,
+                 reservation_id=instances[0]['reservation_id'])
