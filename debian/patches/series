@@ -1,3 +1,4 @@
+zoneaware_simplescheduler.patch
 ec2fixes.patch
 default_schedule_zone.patch
 glance-keystone
