@@ -1,0 +1,28 @@
+commit 7ac94ccf7dbb5838ef877b9d954ea96bf1412b4b
+Author: Anthony Young <sleepsonthefloor@gmail.com>
+Date:   Mon Sep 12 00:16:49 2011 -0700
+
+    fix for lp847604 to unbreak instance rebooting
+
+--- a/nova/compute/api.py
++++ b/nova/compute/api.py
+@@ -1049,7 +1049,7 @@
+                     vm_state=vm_states.ACTIVE,
+                     task_state=task_states.REBOOTING)
+         self._cast_compute_message('reboot_instance', context, instance_id,
+-                reboot_type)
++                params={'reboot_type': reboot_type})
+ 
+     @scheduler_api.reroute_compute("rebuild")
+     def rebuild(self, context, instance_id, image_href, admin_password,
+--- a/nova/virt/libvirt/connection.py
++++ b/nova/virt/libvirt/connection.py
+@@ -467,7 +467,7 @@
+         snapshot_ptr.delete(0)
+ 
+     @exception.wrap_exception()
+-    def reboot(self, instance, network_info):
++    def reboot(self, instance, network_info, reboot_type):
+         """Reboot a virtual machine, given an instance reference.
+ 
+         This method actually destroys and re-creates the domain to ensure the
