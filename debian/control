@@ -1,8 +1,9 @@
 Source: nova
 Section: net
 Priority: extra
-Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
-XSBC-Original-Maintainer: Openstack Maintainers <openstack@lists.launchpad.net>
+Maintainer: RCB Builder <rcb-deploy@lists.rackspace.com>
+XSBC-Original-Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>, Openstack Maintainers <openstack@lists.launchpad.net>
+Bugs: RCB Builder <rcb-deploy@lists.rackspace.com>
 Uploaders: Soren Hansen <soren@ubuntu.com>, Thomas Goirand <zigo@debian.org>
 Build-Depends: debhelper (>= 7.0.50),
  python-m2crypto,
@@ -45,7 +46,7 @@ Standards-Version: 3.9.1
 Homepage: http://launchpad.net/nova
 Vcs-Browser: http://bazaar.launchpad.net/~openstack-ubuntu-packagers/ubuntu/natty/nova/ubuntu/files
 Vcs-Bzr: http://bazaar.launchpad.net/~openstack-ubuntu-packagers/ubuntu/natty/nova/ubuntu/
-
+XSBC-RCB-Component: diablo-d5
 
 Package: python-nova
 Architecture: all

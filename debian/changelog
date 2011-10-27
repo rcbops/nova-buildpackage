@@ -1,7 +1,14 @@
+nova (2011.3-d5-rcb8) natty; urgency=low
+
+  * Non-maintainer upload.
+  * Make make nova-vncproxy run as root pending proper privs fix
+
+ -- RCB Builder <rcb-deploy@lists.rackspace.com>  Thu, 27 Oct 2011 16:09:35 -0500
+
 nova (2011.3-d5-rcb7) natty; urgency=low
 
   * Fixes instance reboot
-  * Makes simple scheduler zone aware. 
+  * Makes simple scheduler zone aware.
 
  -- RCB Builder <rcb-deploy@lists.rackspace.com>  Thu, 20 Oct 2011 17:56:59 -0500
 

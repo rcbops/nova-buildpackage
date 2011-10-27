@@ -15,4 +15,5 @@ pre-start script
 	chown nova:root /var/lock/nova/
 end script
 
-exec su -c "nova-vncproxy --flagfile=/etc/nova/nova.conf" nova
+exec su -c "nova-vncproxy --flagfile=/etc/nova/nova.conf" root
+
