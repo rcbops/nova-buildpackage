@@ -82,6 +82,7 @@ class XenAPIVolumeTestCase(test.TestCase):
                   'image_ref': 1,
                   'kernel_id': 2,
                   'ramdisk_id': 3,
+                  'local_gb': 20,
                   'instance_type_id': '3',  # m1.large
                   'os_type': 'linux',
                   'architecture': 'x86-64'}
@@ -364,7 +365,7 @@ class XenAPIVMTestCase(test.TestCase):
 
     def _test_spawn(self, image_ref, kernel_id, ramdisk_id,
                     instance_type_id="3", os_type="linux",
-                    architecture="x86-64", instance_id=1,
+                    hostname="test", architecture="x86-64", instance_id=1,
                     check_injection=False,
                     create_record=True, empty_dns=False):
         stubs.stubout_loopingcall_start(self.stubs)
@@ -375,8 +376,10 @@ class XenAPIVMTestCase(test.TestCase):
                       'image_ref': image_ref,
                       'kernel_id': kernel_id,
                       'ramdisk_id': ramdisk_id,
+                      'local_gb': 20,
                       'instance_type_id': instance_type_id,
                       'os_type': os_type,
+                      'hostname': hostname,
                       'architecture': architecture}
             instance = db.instance_create(self.context, values)
         else:
@@ -412,7 +415,7 @@ class XenAPIVMTestCase(test.TestCase):
         self.check_vm_params_for_linux()
 
     def test_spawn_not_enough_memory(self):
-        self.assertRaises(Exception,
+        self.assertRaises(exception.InsufficientFreeMemory,
                           self._test_spawn,
                           1, 2, 3, "4")  # m1.xlarge
 
@@ -650,6 +653,7 @@ class XenAPIVMTestCase(test.TestCase):
             'image_ref': 1,
             'kernel_id': 2,
             'ramdisk_id': 3,
+            'local_gb': 20,
             'instance_type_id': '3',  # m1.large
             'os_type': 'linux',
             'architecture': 'x86-64'}
@@ -932,8 +936,9 @@ class XenAPIDetermineDiskImageTestCase(test.TestCase):
         self.fake_instance.architecture = 'x86-64'
 
     def assert_disk_type(self, disk_type):
+        ctx = context.RequestContext('fake', 'fake')
         dt = vm_utils.VMHelper.determine_disk_image_type(
-            self.fake_instance)
+            self.fake_instance, ctx)
         self.assertEqual(disk_type, dt)
 
     def test_instance_disk(self):

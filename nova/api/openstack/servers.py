@@ -334,8 +334,9 @@ class Controller(object):
             LOG.exception(msg)
             raise exc.HTTPBadRequest(explanation=msg)
         try:
-            self.compute_api.reboot(req.environ['nova.context'], id,
-                    reboot_type)
+            # TODO(gundlach): pass reboot_type, support soft reboot in
+            # virt driver
+            self.compute_api.reboot(req.environ['nova.context'], id)
         except Exception, e:
             LOG.exception(_("Error in reboot %s"), e)
             raise exc.HTTPUnprocessableEntity()
@@ -810,14 +811,21 @@ class ControllerV11(Controller):
             msg = _("Invalid metadata")
             raise webob.exc.HTTPBadRequest(explanation=msg)
 
-        image = self.compute_api.snapshot(context,
-                                          instance_id,
-                                          image_name,
-                                          extra_properties=props)
+        try:
+            image = self.compute_api.snapshot(context,
+                                              instance_id,
+                                              image_name,
+                                              extra_properties=props)
+        except exception.InstanceBusy:
+            msg = _("Server is currently creating an image. Please wait.")
+            raise webob.exc.HTTPConflict(explanation=msg)
 
         # build location of newly-created image entity
         image_id = str(image['id'])
-        image_ref = os.path.join(req.application_url, 'images', image_id)
+        image_ref = os.path.join(req.application_url,
+                                 context.project_id,
+                                 'images',
+                                 image_id)
 
         resp = webob.Response(status_int=202)
         resp.headers['Location'] = image_ref

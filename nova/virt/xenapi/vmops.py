@@ -135,11 +135,16 @@ class VMOps(object):
         self._session.call_xenapi('VM.start', vm_ref, False, False)
 
     def _create_disks(self, context, instance):
-        disk_image_type = VMHelper.determine_disk_image_type(instance)
+        disk_image_type = VMHelper.determine_disk_image_type(instance, context)
         vdis = VMHelper.fetch_image(context, self._session,
                 instance, instance.image_ref,
                 instance.user_id, instance.project_id,
                 disk_image_type)
+
+        for vdi in vdis:
+            if vdi["vdi_type"] == "os":
+                self.resize_instance(instance, vdi["vdi_uuid"])
+
         return vdis
 
     def spawn(self, context, instance, network_info):
@@ -169,14 +174,9 @@ class VMOps(object):
 
         #ensure enough free memory is available
         if not VMHelper.ensure_free_mem(self._session, instance):
-            LOG.exception(_('instance %(instance_name)s: not enough free '
-                          'memory') % locals())
-            db.instance_set_state(nova_context.get_admin_context(),
-                                  instance['id'],
-                                  power_state.SHUTDOWN)
-            return
+            raise exception.InsufficientFreeMemory(uuid=instance.uuid)
 
-        disk_image_type = VMHelper.determine_disk_image_type(instance)
+        disk_image_type = VMHelper.determine_disk_image_type(instance, context)
         kernel = None
         ramdisk = None
         try:
@@ -253,6 +253,8 @@ class VMOps(object):
 
         self.create_vifs(vm_ref, instance, network_info)
         self.inject_network_info(instance, network_info, vm_ref)
+        self.inject_hostname(instance, vm_ref, instance['hostname'])
+
         return vm_ref
 
     def _attach_disks(self, instance, disk_image_type, vm_ref, first_vdi_ref,
@@ -624,15 +626,10 @@ class VMOps(object):
                     str(new_disk_size))
             LOG.debug(_("Resize instance %s complete") % (instance.name))
 
-    def reboot(self, instance, reboot_type):
+    def reboot(self, instance):
         """Reboot VM instance."""
         vm_ref = self._get_vm_opaque_ref(instance)
-
-        if reboot_type == "HARD":
-            task = self._session.call_xenapi('Async.VM.hard_reboot', vm_ref)
-        else:
-            task = self._session.call_xenapi('Async.VM.clean_reboot', vm_ref)
-
+        task = self._session.call_xenapi('Async.VM.clean_reboot', vm_ref)
         self._session.wait_for_task(task, instance.id)
 
     def get_agent_version(self, instance, timeout=None):
@@ -1157,6 +1154,16 @@ class VMOps(object):
         #resp = self._make_agent_call('resetnetwork', instance, '', args)
         resp = self._make_plugin_call('agent', 'resetnetwork', instance, '',
                                                                args, vm_ref)
+
+    def inject_hostname(self, instance, vm_ref, hostname):
+        """Inject the hostname of the instance into the xenstore."""
+        if instance.os_type == "windows":
+            # NOTE(jk0): Windows hostnames can only be <= 15 chars.
+            hostname = hostname[:15]
+
+        logging.debug(_("injecting hostname to xs for vm: |%s|"), vm_ref)
+        self._session.call_xenapi_request("VM.add_to_xenstore_data",
+                (vm_ref, "vm-data/hostname", hostname))
 
     def list_from_xenstore(self, vm, path):
         """

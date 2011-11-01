@@ -103,9 +103,8 @@ class _VirtDriverTestCase(test.TestCase):
     def test_reboot(self):
         instance_ref = test_utils.get_test_instance()
         network_info = test_utils.get_test_network_info()
-        reboot_type = "SOFT"
         self.connection.spawn(self.ctxt, instance_ref, network_info)
-        self.connection.reboot(instance_ref, network_info, reboot_type)
+        self.connection.reboot(instance_ref, network_info)
 
     @catch_notimplementederror
     def test_get_host_ip_addr(self):

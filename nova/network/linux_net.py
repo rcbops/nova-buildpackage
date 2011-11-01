@@ -42,9 +42,6 @@ FLAGS = flags.FLAGS
 flags.DEFINE_string('dhcpbridge_flagfile',
                     '/etc/nova/nova-dhcpbridge.conf',
                     'location of flagfile for dhcpbridge')
-flags.DEFINE_string('dhcp_domain',
-                    'novalocal',
-                    'domain to use for building the hostnames')
 flags.DEFINE_string('networks_path', '$state_path/networks',
                     'Location to keep network config files')
 flags.DEFINE_string('public_interface', 'eth0',
@@ -68,6 +65,8 @@ flags.DEFINE_string('linuxnet_interface_driver',
                     'Driver used to create ethernet devices.')
 flags.DEFINE_string('linuxnet_ovs_integration_bridge',
                     'br-int', 'Name of Open vSwitch bridge used with linuxnet')
+flags.DEFINE_bool('send_arp_for_ha', False,
+                  'send gratuitous ARPs for HA setup')
 flags.DEFINE_bool('use_single_default_gateway',
                    False, 'Use single default gateway. Only first nic of vm'
                           ' will get default gateway from dhcp server')
@@ -407,6 +406,10 @@ def bind_floating_ip(floating_ip, check_exit_code=True):
     _execute('ip', 'addr', 'add', floating_ip,
              'dev', FLAGS.public_interface,
              run_as_root=True, check_exit_code=check_exit_code)
+    if FLAGS.send_arp_for_ha:
+        _execute('arping', '-U', floating_ip,
+                 '-A', '-I', FLAGS.public_interface,
+                 '-c', 1, run_as_root=True, check_exit_code=False)
 
 
 def unbind_floating_ip(floating_ip):
@@ -466,18 +469,43 @@ def initialize_gateway_device(dev, network_ref):
 
     # NOTE(vish): The ip for dnsmasq has to be the first address on the
     #             bridge for it to respond to reqests properly
-    suffix = network_ref['cidr'].rpartition('/')[2]
-    out, err = _execute('ip', 'addr', 'add',
-                            '%s/%s' %
-                            (network_ref['dhcp_server'], suffix),
-                            'brd',
-                            network_ref['broadcast'],
-                            'dev',
-                            dev,
-                            run_as_root=True,
-                            check_exit_code=False)
-    if err and err != 'RTNETLINK answers: File exists\n':
-        raise exception.Error('Failed to add ip: %s' % err)
+    full_ip = '%s/%s' % (network_ref['dhcp_server'],
+                         network_ref['cidr'].rpartition('/')[2])
+    new_ip_params = [[full_ip, 'brd', network_ref['broadcast']]]
+    old_ip_params = []
+    out, err = _execute('ip', 'addr', 'show', 'dev', dev,
+                        'scope', 'global', run_as_root=True)
+    for line in out.split('\n'):
+        fields = line.split()
+        if fields and fields[0] == 'inet':
+            ip_params = fields[1:-1]
+            old_ip_params.append(ip_params)
+            if ip_params[0] != full_ip:
+                new_ip_params.append(ip_params)
+    if not old_ip_params or old_ip_params[0][0] != full_ip:
+        gateway = None
+        out, err = _execute('route', '-n', run_as_root=True)
+        for line in out.split('\n'):
+            fields = line.split()
+            if fields and fields[0] == '0.0.0.0' and \
+                            fields[-1] == dev:
+                gateway = fields[1]
+                _execute('route', 'del', 'default', 'gw', gateway,
+                         'dev', dev, check_exit_code=False,
+                         run_as_root=True)
+        for ip_params in old_ip_params:
+            _execute(*_ip_bridge_cmd('del', ip_params, dev),
+                        run_as_root=True)
+        for ip_params in new_ip_params:
+            _execute(*_ip_bridge_cmd('add', ip_params, dev),
+                        run_as_root=True)
+        if gateway:
+            _execute('route', 'add', 'default', 'gw', gateway,
+                        run_as_root=True)
+        if FLAGS.send_arp_for_ha:
+            _execute('arping', '-U', network_ref['dhcp_server'],
+                      '-A', '-I', dev,
+                      '-c', 1, run_as_root=True, check_exit_code=False)
     if(FLAGS.use_ipv6):
         _execute('ip', '-f', 'inet6', 'addr',
                      'change', network_ref['cidr_v6'],
@@ -540,6 +568,22 @@ def get_dhcp_opts(context, network_ref):
     return '\n'.join(hosts)
 
 
+def release_dhcp(dev, address, mac_address):
+    utils.execute('dhcp_release', dev, address, mac_address, run_as_root=True)
+
+
+def _add_dnsmasq_accept_rules(dev):
+    """Allow DHCP and DNS traffic through to dnsmasq."""
+    table = iptables_manager.ipv4['filter']
+    for port in [67, 53]:
+        for proto in ['udp', 'tcp']:
+            args = {'dev': dev, 'port': port, 'proto': proto}
+            table.add_rule('INPUT',
+                           '-i %(dev)s -p %(proto)s -m %(proto)s '
+                           '--dport %(port)s -j ACCEPT' % args)
+    iptables_manager.apply()
+
+
 # NOTE(ja): Sending a HUP only reloads the hostfile, so any
 #           configuration options (like dchp-range, vlan, ...)
 #           aren't reloaded.
@@ -584,7 +628,6 @@ def update_dhcp(context, dev, network_ref):
            'dnsmasq',
            '--strict-order',
            '--bind-interfaces',
-           '--interface=%s' % dev,
            '--conf-file=%s' % FLAGS.dnsmasq_config_file,
            '--domain=%s' % FLAGS.dhcp_domain,
            '--pid-file=%s' % _dhcp_file(dev, 'pid'),
@@ -602,6 +645,8 @@ def update_dhcp(context, dev, network_ref):
         cmd += ['--dhcp-optsfile=%s' % _dhcp_file(dev, 'opts')]
 
     _execute(*cmd, run_as_root=True)
+
+    _add_dnsmasq_accept_rules(dev)
 
 
 @utils.synchronized('radvd_start')
@@ -748,8 +793,11 @@ def _dnsmasq_pid_for(dev):
     pid_file = _dhcp_file(dev, 'pid')
 
     if os.path.exists(pid_file):
-        with open(pid_file, 'r') as f:
-            return int(f.read())
+        try:
+            with open(pid_file, 'r') as f:
+                return int(f.read())
+        except (ValueError, IOError):
+            return None
 
 
 def _ra_pid_for(dev):
@@ -790,6 +838,10 @@ def unplug(network):
     return interface_driver.unplug(network)
 
 
+def get_dev(network):
+    return interface_driver.get_dev(network)
+
+
 class LinuxNetInterfaceDriver(object):
     """Abstract class that defines generic network host API"""
     """ for for all Linux interface drivers."""
@@ -800,6 +852,10 @@ class LinuxNetInterfaceDriver(object):
 
     def unplug(self, network):
         """Destory Linux device, return device name"""
+        raise NotImplementedError()
+
+    def get_dev(self, network):
+        """Get device name"""
         raise NotImplementedError()
 
 
@@ -823,6 +879,9 @@ class LinuxBridgeInterfaceDriver(LinuxNetInterfaceDriver):
         return network['bridge']
 
     def unplug(self, network):
+        return self.get_dev(network)
+
+    def get_dev(self, network):
         return network['bridge']
 
     @classmethod
@@ -947,6 +1006,9 @@ class LinuxOVSInterfaceDriver(LinuxNetInterfaceDriver):
         return dev
 
     def unplug(self, network):
+        return self.get_dev(network)
+
+    def get_dev(self, network):
         dev = "gw-" + str(network['id'])
         return dev
 

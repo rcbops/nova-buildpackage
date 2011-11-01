@@ -529,10 +529,10 @@ def floating_ip_count_by_project(context, project_id):
 
 
 @require_context
-def floating_ip_fixed_ip_associate(context, floating_address, fixed_address):
+def floating_ip_fixed_ip_associate(context, floating_address,
+                                   fixed_address, host):
     session = get_session()
     with session.begin():
-        # TODO(devcamcar): How to ensure floating_id belongs to user?
         floating_ip_ref = floating_ip_get_by_address(context,
                                                      floating_address,
                                                      session=session)
@@ -540,6 +540,7 @@ def floating_ip_fixed_ip_associate(context, floating_address, fixed_address):
                                                fixed_address,
                                                session=session)
         floating_ip_ref.fixed_ip = fixed_ip_ref
+        floating_ip_ref.host = host
         floating_ip_ref.save(session=session)
 
 
@@ -547,7 +548,6 @@ def floating_ip_fixed_ip_associate(context, floating_address, fixed_address):
 def floating_ip_deallocate(context, address):
     session = get_session()
     with session.begin():
-        # TODO(devcamcar): How to ensure floating id belongs to user?
         floating_ip_ref = floating_ip_get_by_address(context,
                                                      address,
                                                      session=session)
@@ -561,7 +561,6 @@ def floating_ip_deallocate(context, address):
 def floating_ip_destroy(context, address):
     session = get_session()
     with session.begin():
-        # TODO(devcamcar): Ensure address belongs to user.
         floating_ip_ref = floating_ip_get_by_address(context,
                                                      address,
                                                      session=session)
@@ -572,8 +571,6 @@ def floating_ip_destroy(context, address):
 def floating_ip_disassociate(context, address):
     session = get_session()
     with session.begin():
-        # TODO(devcamcar): Ensure address belongs to user.
-        #                  Does get_floating_ip_by_address handle this?
         floating_ip_ref = floating_ip_get_by_address(context,
                                                      address,
                                                      session=session)
@@ -583,6 +580,7 @@ def floating_ip_disassociate(context, address):
         else:
             fixed_ip_address = None
         floating_ip_ref.fixed_ip = None
+        floating_ip_ref.host = None
         floating_ip_ref.save(session=session)
     return fixed_ip_address
 
@@ -641,17 +639,23 @@ def floating_ip_get_all_by_project(context, project_id):
 
 @require_context
 def floating_ip_get_by_address(context, address, session=None):
-    # TODO(devcamcar): Ensure the address belongs to user.
     if not session:
         session = get_session()
 
     result = session.query(models.FloatingIp).\
-                     options(joinedload_all('fixed_ip.network')).\
-                     filter_by(address=address).\
-                     filter_by(deleted=can_read_deleted(context)).\
-                     first()
+                options(joinedload_all('fixed_ip.network')).\
+                filter_by(address=address).\
+                filter_by(deleted=can_read_deleted(context)).\
+                first()
+
     if not result:
         raise exception.FloatingIpNotFoundForAddress(address=address)
+
+    # If the floating IP has a project ID set, check to make sure
+    # the non-admin user has access.
+    if result.project_id and is_user_context(context):
+        authorize_project_context(context, result.project_id)
+
     return result
 
 
@@ -669,14 +673,19 @@ def floating_ip_update(context, address, values):
 
 
 @require_admin_context
-def fixed_ip_associate(context, address, instance_id, network_id=None):
+def fixed_ip_associate(context, address, instance_id, network_id=None,
+                       reserved=False):
+    """Keyword arguments:
+    reserved -- should be a boolean value(True or False), exact value will be
+    used to filter on the fixed ip address
+    """
     session = get_session()
     with session.begin():
         network_or_none = or_(models.FixedIp.network_id == network_id,
                               models.FixedIp.network_id == None)
         fixed_ip_ref = session.query(models.FixedIp).\
                                filter(network_or_none).\
-                               filter_by(reserved=False).\
+                               filter_by(reserved=reserved).\
                                filter_by(deleted=False).\
                                filter_by(address=address).\
                                with_lockmode('update').\
@@ -2819,12 +2828,13 @@ def security_group_rule_get_by_security_group(context, security_group_id,
         result = session.query(models.SecurityGroupIngressRule).\
                          filter_by(deleted=can_read_deleted(context)).\
                          filter_by(parent_group_id=security_group_id).\
+                         options(joinedload_all('grantee_group.instances')).\
                          all()
     else:
-        # TODO(vish): Join to group and check for project_id
         result = session.query(models.SecurityGroupIngressRule).\
                          filter_by(deleted=False).\
                          filter_by(parent_group_id=security_group_id).\
+                         options(joinedload_all('grantee_group.instances')).\
                          all()
     return result
 
