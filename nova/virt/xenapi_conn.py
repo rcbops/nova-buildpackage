@@ -203,9 +203,9 @@ class XenAPIConnection(driver.ComputeDriver):
         """ Create snapshot from a running VM instance """
         self._vmops.snapshot(context, instance, image_id)
 
-    def reboot(self, instance, network_info, reboot_type):
+    def reboot(self, instance, network_info):
         """Reboot VM instance"""
-        self._vmops.reboot(instance, reboot_type)
+        self._vmops.reboot(instance)
 
     def set_admin_password(self, instance, new_pass):
         """Set the root/admin password on the VM instance"""

@@ -165,13 +165,12 @@ class ComputeDriver(object):
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
 
-    def reboot(self, instance, network_info, reboot_type):
+    def reboot(self, instance, network_info):
         """Reboot the specified instance.
 
         :param instance: Instance object as returned by DB layer.
         :param network_info:
            :py:meth:`~nova.network.manager.NetworkManager.get_instance_nw_info`
-        :param reboot_type: Either a HARD or SOFT reboot
         """
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()

@@ -24,6 +24,7 @@ from nova import compute
 from nova.compute import instance_types
 from nova.compute import manager as compute_manager
 from nova.compute import power_state
+from nova.compute import task_states
 from nova.compute import vm_states
 from nova import context
 from nova import db
@@ -174,6 +175,20 @@ class ComputeTestCase(test.TestCase):
         self.assertEqual(pre_build_len,
                          len(db.instance_get_all(context.get_admin_context())))
 
+    def test_create_instance_with_img_ref_associates_config_drive(self):
+        """Make sure create associates a config drive."""
+
+        instance_id = self._create_instance(params={'config_drive': '1234', })
+
+        try:
+            self.compute.run_instance(self.context, instance_id)
+            instances = db.instance_get_all(context.get_admin_context())
+            instance = instances[0]
+
+            self.assertTrue(instance.config_drive)
+        finally:
+            db.instance_destroy(self.context, instance_id)
+
     def test_create_instance_associates_config_drive(self):
         """Make sure create associates a config drive."""
 
@@ -300,20 +315,11 @@ class ComputeTestCase(test.TestCase):
         self.compute.resume_instance(self.context, instance_id)
         self.compute.terminate_instance(self.context, instance_id)
 
-    def test_soft_reboot(self):
-        """Ensure instance can be soft rebooted"""
+    def test_reboot(self):
+        """Ensure instance can be rebooted"""
         instance_id = self._create_instance()
-        reboot_type = "SOFT"
         self.compute.run_instance(self.context, instance_id)
-        self.compute.reboot_instance(self.context, instance_id, reboot_type)
-        self.compute.terminate_instance(self.context, instance_id)
-
-    def test_hard_reboot(self):
-        """Ensure instance can be hard rebooted"""
-        instance_id = self._create_instance()
-        reboot_type = "HARD"
-        self.compute.run_instance(self.context, instance_id)
-        self.compute.reboot_instance(self.context, instance_id, reboot_type)
+        self.compute.reboot_instance(self.context, instance_id)
         self.compute.terminate_instance(self.context, instance_id)
 
     def test_set_admin_password(self):
@@ -346,6 +352,36 @@ class ComputeTestCase(test.TestCase):
         self.compute.run_instance(self.context, instance_id)
         self.compute.snapshot_instance(self.context, instance_id, name)
         self.compute.terminate_instance(self.context, instance_id)
+
+    def test_snapshot_conflict_backup(self):
+        """Can't backup an instance which is already being backed up."""
+        instance_id = self._create_instance()
+        instance_values = {'task_state': task_states.IMAGE_BACKUP}
+        db.instance_update(self.context, instance_id, instance_values)
+
+        self.assertRaises(exception.InstanceBackingUp,
+                          self.compute_api.backup,
+                          self.context,
+                          instance_id,
+                          None,
+                          None,
+                          None)
+
+        db.instance_destroy(self.context, instance_id)
+
+    def test_snapshot_conflict_snapshot(self):
+        """Can't snapshot an instance which is already being snapshotted."""
+        instance_id = self._create_instance()
+        instance_values = {'task_state': task_states.IMAGE_SNAPSHOT}
+        db.instance_update(self.context, instance_id, instance_values)
+
+        self.assertRaises(exception.InstanceSnapshotting,
+                          self.compute_api.snapshot,
+                          self.context,
+                          instance_id,
+                          None)
+
+        db.instance_destroy(self.context, instance_id)
 
     def test_console_output(self):
         """Make sure we can get console output from instance"""
@@ -1563,12 +1599,16 @@ class ComputeTestCase(test.TestCase):
             db.block_device_mapping_destroy(self.context, bdm['id'])
         self.compute.terminate_instance(self.context, instance_id)
 
-    def test_ephemeral_size(self):
+    def test_volume_size(self):
         local_size = 2
-        inst_type = {'local_gb': local_size}
-        self.assertEqual(self.compute_api._ephemeral_size(inst_type,
+        swap_size = 3
+        inst_type = {'local_gb': local_size, 'swap': swap_size}
+        self.assertEqual(self.compute_api._volume_size(inst_type,
                                                           'ephemeral0'),
                          local_size)
-        self.assertEqual(self.compute_api._ephemeral_size(inst_type,
-                                                          'ephemeral1'),
+        self.assertEqual(self.compute_api._volume_size(inst_type,
+                                                       'ephemeral1'),
                          0)
+        self.assertEqual(self.compute_api._volume_size(inst_type,
+                                                       'swap'),
+                         swap_size)

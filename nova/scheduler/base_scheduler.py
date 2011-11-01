@@ -27,8 +27,6 @@ from nova.scheduler import abstract_scheduler
 from nova.scheduler import host_filter
 
 FLAGS = flags.FLAGS
-flags.DEFINE_boolean('spread_first', False,
-                     'Use a spread-first zone scheduler strategy')
 LOG = logging.getLogger('nova.scheduler.base_scheduler')
 
 
@@ -56,6 +54,9 @@ class BaseScheduler(abstract_scheduler.AbstractScheduler):
         """Derived classes may override this to provide more sophisticated
         scheduling objectives
         """
+        # Make sure if there are compute hosts to serve the request.
+        if not hosts:
+            return []
         # NOTE(sirp): The default logic is the same as the NoopCostFunction
         hosts = [dict(weight=1, hostname=hostname, capabilities=capabilities)
                  for hostname, capabilities in hosts]
@@ -69,10 +70,5 @@ class BaseScheduler(abstract_scheduler.AbstractScheduler):
             num_instances -= len(hosts)
         if num_instances > 0:
             instances.extend(hosts[:num_instances])
-
-        # Adjust the weights for a spread-first strategy
-        if FLAGS.spread_first:
-            for i, host in enumerate(hosts):
-                host['weight'] = i + 1
 
         return instances

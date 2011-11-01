@@ -170,8 +170,7 @@ class VMWareAPIVMTestCase(test.TestCase):
         self._create_vm()
         info = self.conn.get_info(1)
         self._check_vm_info(info, power_state.RUNNING)
-        reboot_type = "SOFT"
-        self.conn.reboot(self.instance, self.network_info, reboot_type)
+        self.conn.reboot(self.instance, self.network_info)
         info = self.conn.get_info(1)
         self._check_vm_info(info, power_state.RUNNING)
 

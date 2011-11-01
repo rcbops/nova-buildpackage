@@ -182,6 +182,18 @@ class AdminRequired(NotAuthorized):
     message = _("User does not have admin privileges")
 
 
+class InstanceBusy(NovaException):
+    message = _("Instance %(instance_id)s is busy. (%(task_state)s)")
+
+
+class InstanceSnapshotting(InstanceBusy):
+    message = _("Instance %(instance_id)s is currently snapshotting.")
+
+
+class InstanceBackingUp(InstanceBusy):
+    message = _("Instance %(instance_id)s is currently being backed up.")
+
+
 class Invalid(NovaException):
     message = _("Unacceptable parameters.")
 
@@ -506,7 +518,7 @@ class FixedIpInvalid(Invalid):
     message = _("Fixed IP address %(address)s is invalid.")
 
 
-class NoMoreFixedIps(Error):
+class NoMoreFixedIps(NovaException):
     message = _("Zero fixed ips available.")
 
 
@@ -715,7 +727,7 @@ class NetworkAdapterNotFound(NotFound):
 
 
 class ClassNotFound(NotFound):
-    message = _("Class %(class_name)s could not be found")
+    message = _("Class %(class_name)s could not be found: %(exception)s")
 
 
 class NotAllowed(NovaException):
@@ -817,3 +829,7 @@ class ZoneRequestError(Error):
         if message is None:
             message = _("1 or more Zones could not complete the request")
         super(ZoneRequestError, self).__init__(message=message)
+
+
+class InsufficientFreeMemory(NovaException):
+    message = _("Insufficient free memory on compute node to start %(uuid)s.")

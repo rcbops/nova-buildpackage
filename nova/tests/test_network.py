@@ -14,7 +14,6 @@
 # WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 # License for the specific language governing permissions and limitations
 # under the License.
-import mox
 
 from nova import context
 from nova import db
@@ -22,7 +21,9 @@ from nova import exception
 from nova import log as logging
 from nova import test
 from nova.network import manager as network_manager
-from nova.tests import fake_network
+
+
+import mox
 
 
 LOG = logging.getLogger('nova.tests.network')
@@ -137,50 +138,60 @@ class FlatNetworkTestCase(test.TestCase):
                                               is_admin=False)
 
     def test_get_instance_nw_info(self):
-        fake_get_instance_nw_info = fake_network.fake_get_instance_nw_info
+        self.mox.StubOutWithMock(db, 'fixed_ip_get_by_instance')
+        self.mox.StubOutWithMock(db, 'virtual_interface_get_by_instance')
+        self.mox.StubOutWithMock(db, 'instance_type_get')
 
-        nw_info = fake_get_instance_nw_info(self.stubs, 0, 2)
-        self.assertFalse(nw_info)
+        db.fixed_ip_get_by_instance(mox.IgnoreArg(),
+                                    mox.IgnoreArg()).AndReturn(fixed_ips)
+        db.virtual_interface_get_by_instance(mox.IgnoreArg(),
+                                             mox.IgnoreArg()).AndReturn(vifs)
+        db.instance_type_get(mox.IgnoreArg(),
+                                   mox.IgnoreArg()).AndReturn(flavor)
+        self.mox.ReplayAll()
 
-        for i, (nw, info) in enumerate(nw_info):
-            check = {'bridge': 'fake_br%d' % i,
+        nw_info = self.network.get_instance_nw_info(None, 0, 0, None)
+
+        self.assertTrue(nw_info)
+
+        for i, nw in enumerate(nw_info):
+            i8 = i + 8
+            check = {'bridge': 'fa%s' % i,
                      'cidr': '192.168.%s.0/24' % i,
-                     'cidr_v6': '2001:db8:0:%x::/64' % i,
+                     'cidr_v6': '2001:db%s::/64' % i8,
                      'id': i,
                      'multi_host': False,
-                     'injected': False,
-                     'bridge_interface': 'fake_eth%d' % i,
+                     'injected': 'DONTCARE',
+                     'bridge_interface': 'fake_fa%s' % i,
                      'vlan': None}
 
-            self.assertDictMatch(nw, check)
+            self.assertDictMatch(nw[0], check)
 
-            check = {'broadcast': '192.168.%d.255' % i,
-                     'dhcp_server': '192.168.%d.1' % i,
-                     'dns': ['192.168.%d.3' % n, '192.168.%d.4' % n],
-                     'gateway': '192.168.%d.1' % i,
-                     'gateway6': '2001:db8:0:%x::1' % i,
+            check = {'broadcast': '192.168.%s.255' % i,
+                     'dhcp_server': '192.168.%s.1' % i,
+                     'dns': 'DONTCARE',
+                     'gateway': '192.168.%s.1' % i,
+                     'gateway6': '2001:db%s::1' % i8,
                      'ip6s': 'DONTCARE',
                      'ips': 'DONTCARE',
-                     'label': 'test%d' % i,
-                     'mac': 'DE:AD:BE:EF:00:%02x' % i,
-                     'vif_uuid':
-                        '00000000-0000-0000-0000-00000000000000%02d' % i,
-                     'rxtx_cap': 3,
+                     'label': 'test%s' % i,
+                     'mac': 'DE:AD:BE:EF:00:0%s' % i,
+                     'vif_uuid': ('00000000-0000-0000-0000-000000000000000%s' %
+                                  i),
+                     'rxtx_cap': 'DONTCARE',
                      'should_create_vlan': False,
                      'should_create_bridge': False}
-            self.assertDictMatch(info, check)
+            self.assertDictMatch(nw[1], check)
 
             check = [{'enabled': 'DONTCARE',
-                      'ip': '2001:db8::dcad:beff:feef:%s' % i,
+                      'ip': '2001:db%s::dcad:beff:feef:%s' % (i8, i),
                       'netmask': '64'}]
-            self.assertDictListMatch(info['ip6s'], check)
+            self.assertDictListMatch(nw[1]['ip6s'], check)
 
-            num_fixed_ips = len(info['ips'])
-            check = [{'enabled': 'DONTCARE',
-                      'ip': '192.168.%d.1%02d' % (i, ip_num),
-                      'netmask': '255.255.255.0'}
-                      for ip_num in xrange(num_fixed_ips)]
-            self.assertDictListMatch(info['ips'], check)
+            check = [{'enabled': '1',
+                      'ip': '192.168.%s.100' % i,
+                      'netmask': '255.255.255.0'}]
+            self.assertDictListMatch(nw[1]['ips'], check)
 
     def test_validate_networks(self):
         self.mox.StubOutWithMock(db, 'network_get_all_by_uuids')
@@ -286,7 +297,8 @@ class VlanNetworkTestCase(test.TestCase):
 
         db.fixed_ip_associate(mox.IgnoreArg(),
                               mox.IgnoreArg(),
-                              mox.IgnoreArg()).AndReturn('192.168.0.1')
+                              mox.IgnoreArg(),
+                              reserved=True).AndReturn('192.168.0.1')
         db.fixed_ip_update(mox.IgnoreArg(),
                            mox.IgnoreArg(),
                            mox.IgnoreArg())
@@ -435,6 +447,52 @@ class VlanNetworkTestCase(test.TestCase):
         self.network.add_fixed_ip_to_instance(self.context, 1, HOST,
                                               networks[0]['id'])
 
+    def test_ip_association_and_allocation_of_other_project(self):
+        """Makes sure that we cannot deallocaate or disassociate
+        a public ip of other project"""
+
+        context1 = context.RequestContext('user', 'project1')
+        context2 = context.RequestContext('user', 'project2')
+
+        address = '1.2.3.4'
+        float_addr = db.floating_ip_create(context1.elevated(),
+                {'address': address,
+                 'project_id': context1.project_id})
+
+        instance = db.instance_create(context1,
+                {'project_id': 'project1'})
+
+        fix_addr = db.fixed_ip_associate_pool(context1.elevated(),
+                1, instance['id'])
+
+        # Associate the IP with non-admin user context
+        self.assertRaises(exception.NotAuthorized,
+                          self.network.associate_floating_ip,
+                          context2,
+                          float_addr,
+                          fix_addr)
+
+        # Deallocate address from other project
+        self.assertRaises(exception.NotAuthorized,
+                          self.network.deallocate_floating_ip,
+                          context2,
+                          float_addr)
+
+        # Now Associates the address to the actual project
+        self.network.associate_floating_ip(context1, float_addr, fix_addr)
+
+        # Now try dis-associating from other project
+        self.assertRaises(exception.NotAuthorized,
+                          self.network.disassociate_floating_ip,
+                          context2,
+                          float_addr)
+
+        # Clean up the ip addresses
+        self.network.deallocate_floating_ip(context1, float_addr)
+        self.network.deallocate_fixed_ip(context1, fix_addr)
+        db.floating_ip_destroy(context1.elevated(), float_addr)
+        db.fixed_ip_disassociate(context1.elevated(), fix_addr)
+
 
 class CommonNetworkTestCase(test.TestCase):
 
@@ -445,7 +503,7 @@ class CommonNetworkTestCase(test.TestCase):
 
         class FakeDB:
             def fixed_ip_get_by_instance(self, context, instance_id):
-                return [dict(address='10.0.0.0'),  dict(address='10.0.0.1'),
+                return [dict(address='10.0.0.0'), dict(address='10.0.0.1'),
                         dict(address='10.0.0.2')]
 
             def network_get_by_cidr(self, context, cidr):

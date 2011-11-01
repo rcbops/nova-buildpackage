@@ -87,6 +87,7 @@ class ExtensionControllerTest(test.TestCase):
         self.ext_list = [
             "Createserverext",
             "FlavorExtraSpecs",
+            "FlavorExtraData",
             "Floating_ips",
             "Fox In Socks",
             "Hosts",
@@ -144,6 +145,13 @@ class ExtensionControllerTest(test.TestCase):
                 "description": "The Fox In Socks Extension",
                 "alias": "FOXNSOX",
                 "links": []})
+
+    def test_get_non_existing_extension_json(self):
+        app = openstack.APIRouterV11()
+        ext_midware = extensions.ExtensionMiddleware(app)
+        request = webob.Request.blank("/123/extensions/4")
+        response = request.get_response(ext_midware)
+        self.assertEqual(404, response.status_int)
 
     def test_list_extensions_xml(self):
         app = openstack.APIRouterV11()

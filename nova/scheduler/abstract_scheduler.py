@@ -20,8 +20,8 @@ customize the behavior: filter_hosts() and weigh_hosts(). The default
 behavior is to simply select all hosts and weight them the same.
 """
 
-import json
 import operator
+import json
 
 import M2Crypto
 

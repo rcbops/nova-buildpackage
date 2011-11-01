@@ -1,6 +1,4 @@
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
-# Copyright 2010 OpenStack LLC.
+# Copyright 2011 Isaku Yamahata
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -14,33 +12,37 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from sqlalchemy import Column, Integer, MetaData, String, Table
+from sqlalchemy import Column, Integer, MetaData, Table, String
 
 meta = MetaData()
+
+default_local_device = Column(
+    'default_local_device',
+    String(length=255, convert_unicode=False, assert_unicode=None,
+           unicode_error=None, _warn_on_bytestring=False),
+    nullable=True)
+
+default_swap_device = Column(
+    'default_swap_device',
+    String(length=255, convert_unicode=False, assert_unicode=None,
+           unicode_error=None, _warn_on_bytestring=False),
+    nullable=True)
 
 instances = Table('instances', meta,
         Column('id', Integer(), primary_key=True, nullable=False),
         )
-
-instances_os_type = Column('os_type',
-                           String(length=255, convert_unicode=False,
-                                  assert_unicode=None, unicode_error=None,
-                                  _warn_on_bytestring=False),
-                           nullable=True)
 
 
 def upgrade(migrate_engine):
     # Upgrade operations go here. Don't create your own engine;
     # bind migrate_engine to your metadata
     meta.bind = migrate_engine
-
-    instances.create_column(instances_os_type)
-    migrate_engine.execute(instances.update()\
-                           .where(instances.c.os_type == None)\
-                           .values(os_type='linux'))
+    instances.create_column(default_local_device)
+    instances.create_column(default_swap_device)
 
 
 def downgrade(migrate_engine):
+    # Operations to reverse the above upgrade go here.
     meta.bind = migrate_engine
-
-    instances.drop_column('os_type')
+    instances.drop_column('default_swap_device')
+    instances.drop_column('default_local_device')
