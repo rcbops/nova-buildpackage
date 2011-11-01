@@ -4,7 +4,7 @@ Author: Soren Hansen <soren@ubuntu.com>
 Last-Update: 2011-04-15
 --- a/nova/virt/libvirt/connection.py
 +++ b/nova/virt/libvirt/connection.py
-@@ -699,8 +699,8 @@
+@@ -712,8 +712,8 @@
          ajaxterm_cmd = 'sudo socat - %s' \
                         % get_pty_for_instance(instance['name'])
  

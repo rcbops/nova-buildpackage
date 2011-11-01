@@ -1,8 +1,5 @@
 zoneaware_simplescheduler.patch
 ec2fixes.patch
 default_schedule_zone.patch
-glance-keystone
-nova_snap_as_qcow.diff
 nova-manage_flagfile_location.patch
 packaged-ajaxterm-calls.patch
-fix_reboot.patch

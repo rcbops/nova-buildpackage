@@ -1,7 +1,7 @@
 === modified file 'bin/nova-manage'
 --- a/bin/nova-manage
 +++ b/bin/nova-manage
-@@ -2032,7 +2032,7 @@
+@@ -2076,7 +2076,7 @@
  
  def main():
      """Parse options and call the appropriate class/method."""

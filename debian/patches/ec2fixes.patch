@@ -1,6 +1,6 @@
 --- a/nova/api/ec2/cloud.py
 +++ b/nova/api/ec2/cloud.py
-@@ -821,7 +821,7 @@
+@@ -857,7 +857,7 @@
          return source_project_id
  
      def create_security_group(self, context, group_name, group_description):
@@ -9,7 +9,7 @@
              # Some validation to ensure that values match API spec.
              # - Alphanumeric characters, spaces, dashes, and underscores.
              # TODO(Daviey): LP: #813685 extend beyond group_name checking, and
-@@ -1362,7 +1362,7 @@
+@@ -1398,7 +1398,7 @@
              user_data=kwargs.get('user_data'),
              security_group=kwargs.get('security_group'),
              availability_zone=kwargs.get('placement', {}).get(
