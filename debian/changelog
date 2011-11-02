@@ -1,3 +1,10 @@
+nova (2011.3-final-rcb1) natty; urgency=low
+
+  * import github.com/openstack/nova, revision
+    c56ac85b4a13094efe23ea355986658761b473eb (tag rcb_v1.1)
+
+ -- RCB Builder <rcb-deploy@lists.rackspace.com>  Wed, 02 Nov 2011 12:10:40 -0500
+
 nova (2011.3-d5-rcb8) natty; urgency=low
 
   * Non-maintainer upload.
