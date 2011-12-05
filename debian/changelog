@@ -1,3 +1,12 @@
+nova (2011.3-final-rcb4) natty; urgency=low
+
+  * Patch to fix availability_zone in simple scheduler and refresh availability
+    zones in service refreshes
+    https://review.openstack.org/#patch,sidebyside,2082,3,nova/scheduler/simple.py
+    https://review.openstack.org/#patch,sidebyside,2082,3,nova/service.py
+
+ -- RCB Builder <rcb-deploy@lists.rackspace.com>  Mon, 05 Dec 2011 16:07:03 -0600
+
 nova (2011.3-final-rcb3) natty; urgency=low
 
   * patch to fix race in allocating fixed ips:

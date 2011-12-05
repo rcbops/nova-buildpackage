@@ -1,0 +1,56 @@
+--- a/Authors
++++ b/Authors
+@@ -58,6 +58,7 @@
+ John Tran <jtran@attinteractive.com>
+ Jonathan Bryce <jbryce@jbryce.com>
+ Jordan Rinke <jordan@openstack.org>
++Joseph Breu <breu@breu.org>
+ Joseph Suh <jsuh@isi.edu>
+ Josh Durgin <joshd@hq.newdream.net>
+ Josh Kearney <josh@jk0.org>
+--- a/nova/scheduler/simple.py
++++ b/nova/scheduler/simple.py
+@@ -34,6 +34,9 @@
+                      "maximum number of volume gigabytes to allow per host")
+ flags.DEFINE_integer("max_networks", 1000,
+                      "maximum number of networks to allow per host")
++flags.DEFINE_string("default_schedule_zone", None,
++                    "zone to use when user doesnt specify one")
++
+ 
+ 
+ class SimpleScheduler(chance.ChanceScheduler):
+@@ -41,6 +44,7 @@
+ 
+     def _schedule_instance(self, context, instance_id, *_args, **_kwargs):
+         """Picks a host that is up and has the fewest running instances."""
++        zone, host = FLAGS.default_schedule_zone, None
+         instance_ref = db.instance_get(context, instance_id)
+ 
+         availability_zone = instance_ref.get('availability_zone')
+--- a/nova/service.py
++++ b/nova/service.py
+@@ -253,6 +253,8 @@
+     def report_state(self):
+         """Update the state of this service in the datastore."""
+         ctxt = context.get_admin_context()
++        zone = FLAGS.node_availability_zone
++        state_catalog = {}
+         try:
+             try:
+                 service_ref = db.service_get(ctxt, self.service_id)
+@@ -262,9 +264,12 @@
+                 self._create_service_ref(ctxt)
+                 service_ref = db.service_get(ctxt, self.service_id)
+ 
++            state_catalog['report_count'] = service_ref['report_count'] + 1
++            if zone != service_ref['availability_zone']:
++                state_catalog['availability_zone'] = zone
++
+             db.service_update(ctxt,
+-                             self.service_id,
+-                             {'report_count': service_ref['report_count'] + 1})
++                             self.service_id, service_catalog)
+ 
+             # TODO(termie): make this pattern be more elegant.
+             if getattr(self, 'model_disconnected', False):
