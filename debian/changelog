@@ -1,3 +1,10 @@
+nova (2011.3-final-rcb3) natty; urgency=low
+
+  * patch to fix race in allocating fixed ips:
+    https://review.openstack.org/#patch,sidebyside,1930,2,nova/network/manager.py
+
+ -- RCB Builder <rcb-deploy@lists.rackspace.com>  Mon, 05 Dec 2011 15:00:16 -0600
+
 nova (2011.3-final-rcb2) natty; urgency=low
 
   * Add runtime dependancy on nova-novnc
