@@ -1,3 +1,9 @@
+nova (2011.3-final-rcb5) natty; urgency=low
+
+  * refactor availability_zone patches to pass nova unittests
+
+ -- RCB Builder <rcb-deploy@lists.rackspace.com>  Thu, 08 Dec 2011 11:25:24 -0600
+
 nova (2011.3-final-rcb4) natty; urgency=low
 
   * Patch to fix availability_zone in simple scheduler and refresh availability

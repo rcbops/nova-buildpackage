@@ -10,17 +10,7 @@
  Josh Kearney <josh@jk0.org>
 --- a/nova/scheduler/simple.py
 +++ b/nova/scheduler/simple.py
-@@ -34,6 +34,9 @@
-                      "maximum number of volume gigabytes to allow per host")
- flags.DEFINE_integer("max_networks", 1000,
-                      "maximum number of networks to allow per host")
-+flags.DEFINE_string("default_schedule_zone", None,
-+                    "zone to use when user doesnt specify one")
-+
- 
- 
- class SimpleScheduler(chance.ChanceScheduler):
-@@ -41,6 +44,7 @@
+@@ -41,6 +41,7 @@
  
      def _schedule_instance(self, context, instance_id, *_args, **_kwargs):
          """Picks a host that is up and has the fewest running instances."""
