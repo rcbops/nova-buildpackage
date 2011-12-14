@@ -1,3 +1,9 @@
+nova (2011.3-final-rcb6) natty; urgency=low
+
+  * update logrotates 
+
+ -- RCB Builder <rcb-deploy@lists.rackspace.com>  Wed, 14 Dec 2011 00:40:47 -0600
+
 nova (2011.3-final-rcb5) natty; urgency=low
 
   * refactor availability_zone patches to pass nova unittests
