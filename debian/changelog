@@ -1,6 +1,12 @@
+nova (2011.3-final-rcb7) natty; urgency=low
+
+  * remove runtime dep on openiscsi
+
+ -- RCB Builder <rcb-deploy@lists.rackspace.com>  Sun, 18 Dec 2011 17:54:34 -0600
+
 nova (2011.3-final-rcb6) natty; urgency=low
 
-  * update logrotates 
+  * update logrotates
 
  -- RCB Builder <rcb-deploy@lists.rackspace.com>  Wed, 14 Dec 2011 00:40:47 -0600
 

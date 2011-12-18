@@ -127,9 +127,9 @@ Description: OpenStack Compute - common files
 Package: nova-compute
 Architecture: all
 Depends: ${ostack-lsb-base}, ${nova-compute-deps}, nova-common (= ${binary:Version}), kpartx, curl, parted,
- ebtables, gawk, iptables, open-iscsi, ${nova-compute-default-hypervisor} | nova-compute-hypervisor,
+ ebtables, gawk, iptables, ${nova-compute-default-hypervisor} | nova-compute-hypervisor,
  ${python:Depends}, ${misc:Depends}
-Recommends: ajaxterm
+Recommends: ajaxterm, open-iscsi
 Description: OpenStack Compute - compute node
  OpenStack is a reliable cloud infrastructure. Its mission is to produce
  the ubiquitous cloud computing platform that will meet the needs of public
