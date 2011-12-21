@@ -130,6 +130,7 @@ Depends: ${ostack-lsb-base}, ${nova-compute-deps}, nova-common (= ${binary:Versi
  ebtables, gawk, iptables, ${nova-compute-default-hypervisor} | nova-compute-hypervisor,
  ${python:Depends}, ${misc:Depends}
 Recommends: ajaxterm, open-iscsi
+Suggests: iputils-arping
 Description: OpenStack Compute - compute node
  OpenStack is a reliable cloud infrastructure. Its mission is to produce
  the ubiquitous cloud computing platform that will meet the needs of public
@@ -347,7 +348,7 @@ Description: OpenStack Compute - API frontend
 Package: nova-network
 Architecture: all
 Depends: ${ostack-lsb-base}, socat, vlan, bridge-utils, dnsmasq-base, nova-common (= ${binary:Version}), ${python:Depends}, ${misc:Depends}
-Suggests: radvd
+Suggests: radvd, iputils-arping
 Description: OpenStack Compute - Network manager
  OpenStack is a reliable cloud infrastructure. Its mission is to produce
  the ubiquitous cloud computing platform that will meet the needs of public
