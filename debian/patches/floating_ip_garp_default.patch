@@ -1,0 +1,11 @@
+--- a/nova/network/linux_net.py
++++ b/nova/network/linux_net.py
+@@ -71,7 +71,7 @@
+ flags.DEFINE_bool('use_single_default_gateway',
+                    False, 'Use single default gateway. Only first nic of vm'
+                           ' will get default gateway from dhcp server')
+-flags.DEFINE_bool('send_arp_for_ha', False,
++flags.DEFINE_bool('send_arp_for_ha', True,
+                   'send gratuitous ARPs for HA setup')
+ binary_name = os.path.basename(inspect.stack()[-1][1])
+ 

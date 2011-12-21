@@ -1,4 +1,5 @@
 floating_ip_garp.patch
+floating_ip_garp_default.patch
 zoneaware_simplescheduler.patch
 ec2fixes.patch
 default_schedule_zone.patch
