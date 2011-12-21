@@ -1,0 +1,11 @@
+--- a/nova/network/linux_net.py
++++ b/nova/network/linux_net.py
+@@ -65,7 +65,7 @@
+                     'Driver used to create ethernet devices.')
+ flags.DEFINE_string('linuxnet_ovs_integration_bridge',
+                     'br-int', 'Name of Open vSwitch bridge used with linuxnet')
+-flags.DEFINE_bool('send_arp_for_ha', False,
++flags.DEFINE_bool('send_arp_for_ha', True,
+                   'send gratuitous ARPs for HA setup')
+ flags.DEFINE_bool('use_single_default_gateway',
+                    False, 'Use single default gateway. Only first nic of vm'
