@@ -1,3 +1,10 @@
+nova (2011.3-final-rcb11) natty; urgency=low
+
+  * Cherry-pick commit 475f3624245500c5382faf5b2708a59fcec2c9ad
+    Fix RPC responses to allow None response correctly
+
+ -- RCB Builder <rcb-deploy@lists.rackspace.com>  Wed, 01 Feb 2012 15:21:53 -0600
+
 nova (2011.3-final-rcb10) natty; urgency=low
 
   * Change default behavior to send out gratuitous arp on floating assignment 
