@@ -1,3 +1,10 @@
+nova (2012.0+e3-rcb1) natty; urgency=low
+
+  * Bump to essex-e3 from https://github.com/openstack/nova.git,
+    revision facd8951f7ca4e3dd613d70aba855d6800d89922
+
+ -- RCB Builder <rcb-deploy@lists.rackspace.com>  Mon, 13 Feb 2012 08:41:27 -0600
+
 nova (2011.3-final-rcb11) natty; urgency=low
 
   * Cherry-pick commit 475f3624245500c5382faf5b2708a59fcec2c9ad
@@ -7,7 +14,7 @@ nova (2011.3-final-rcb11) natty; urgency=low
 
 nova (2011.3-final-rcb10) natty; urgency=low
 
-  * Change default behavior to send out gratuitous arp on floating assignment 
+  * Change default behavior to send out gratuitous arp on floating assignment
 
  -- RCB Builder <rcb-deploy@lists.rackspace.com>  Wed, 21 Dec 2011 20:03:57 +0000
 

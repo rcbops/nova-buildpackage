@@ -46,7 +46,7 @@ Standards-Version: 3.9.1
 Homepage: http://launchpad.net/nova
 Vcs-Browser: http://bazaar.launchpad.net/~openstack-ubuntu-packagers/ubuntu/natty/nova/ubuntu/files
 Vcs-Bzr: http://bazaar.launchpad.net/~openstack-ubuntu-packagers/ubuntu/natty/nova/ubuntu/
-XSBC-RCB-Component: diablo-final
+XSBC-RCB-Component: essex-e3
 
 Package: python-nova
 Architecture: all
