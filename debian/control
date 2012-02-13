@@ -39,6 +39,7 @@ Build-Depends-Indep: python-support,
  python-lxml,
  python-unittest2,
  python-feedparser,
+ python-keystoneclient,
  pep8
 Build-Conflicts: python-cjson
 Standards-Version: 3.9.1
@@ -78,6 +79,7 @@ Depends: ${python:Depends},
  python-simplejson,
  python-lxml,
  python-feedparser,
+ python-keystoneclient
  sudo,
  ${misc:Depends}
 Suggests: python-suds (>= 0.4.0),
