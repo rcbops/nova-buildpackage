@@ -1,5 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
+# Copyright 2011 OpenStack LLC.
 # Copyright 2010 United States Government as represented by the
 # Administrator of the National Aeronautics and Space Administration.
 # All Rights Reserved.
@@ -18,8 +19,10 @@
 
 """RequestContext: context for requests that persist through all of nova."""
 
+import copy
 import uuid
 
+from nova import local
 from nova import utils
 
 
@@ -30,9 +33,18 @@ class RequestContext(object):
 
     """
 
-    def __init__(self, user_id, project_id, is_admin=None, read_deleted=False,
+    def __init__(self, user_id, project_id, is_admin=None, read_deleted="no",
                  roles=None, remote_address=None, timestamp=None,
-                 request_id=None, auth_token=None, strategy='noauth'):
+                 request_id=None, auth_token=None, strategy='noauth',
+                 overwrite=True):
+        """
+        :param read_deleted: 'no' indicates deleted records are hidden, 'yes'
+            indicates deleted records are visible, 'only' indicates that
+            *only* deleted records are visible.
+
+        :param overwrite: Set to False to ensure that the greenthread local
+            copy of the index is not overwritten.
+        """
         self.user_id = user_id
         self.project_id = project_id
         self.roles = roles or []
@@ -47,10 +59,12 @@ class RequestContext(object):
             timestamp = utils.parse_strtime(timestamp)
         self.timestamp = timestamp
         if not request_id:
-            request_id = unicode(uuid.uuid4())
+            request_id = 'req-' + str(utils.gen_uuid())
         self.request_id = request_id
         self.auth_token = auth_token
         self.strategy = strategy
+        if overwrite or not hasattr(local.store, 'context'):
+            local.store.context = self
 
     def to_dict(self):
         return {'user_id': self.user_id,
@@ -68,20 +82,20 @@ class RequestContext(object):
     def from_dict(cls, values):
         return cls(**values)
 
-    def elevated(self, read_deleted=None):
+    def elevated(self, read_deleted=None, overwrite=False):
         """Return a version of this context with admin flag set."""
-        rd = self.read_deleted if read_deleted is None else read_deleted
-        return RequestContext(user_id=self.user_id,
-                              project_id=self.project_id,
-                              is_admin=True,
-                              read_deleted=rd,
-                              roles=self.roles,
-                              remote_address=self.remote_address,
-                              timestamp=self.timestamp,
-                              request_id=self.request_id,
-                              auth_token=self.auth_token,
-                              strategy=self.strategy)
+        context = copy.copy(self)
+        context.is_admin = True
+
+        if read_deleted is not None:
+            context.read_deleted = read_deleted
+
+        return context
 
 
-def get_admin_context(read_deleted=False):
-    return RequestContext(None, None, True, read_deleted)
+def get_admin_context(read_deleted="no"):
+    return RequestContext(user_id=None,
+                          project_id=None,
+                          is_admin=True,
+                          read_deleted=read_deleted,
+                          overwrite=False)

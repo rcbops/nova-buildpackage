@@ -27,10 +27,11 @@ from nova import exception
 from nova import db
 from nova import flags
 from nova import log as logging
+import nova.policy
 from nova import rpc
 from nova import test
 from nova import utils
-from nova import volume
+import nova.volume.api
 
 FLAGS = flags.FLAGS
 LOG = logging.getLogger('nova.tests.volume')
@@ -62,11 +63,12 @@ class VolumeTestCase(test.TestCase):
         vol['availability_zone'] = FLAGS.storage_availability_zone
         vol['status'] = "creating"
         vol['attach_status'] = "detached"
-        return db.volume_create(context.get_admin_context(), vol)['id']
+        return db.volume_create(context.get_admin_context(), vol)
 
     def test_create_delete_volume(self):
         """Test volume can be created and deleted."""
-        volume_id = self._create_volume()
+        volume = self._create_volume()
+        volume_id = volume['id']
         self.volume.create_volume(self.context, volume_id)
         self.assertEqual(volume_id, db.volume_get(context.get_admin_context(),
                          volume_id).id)
@@ -79,22 +81,24 @@ class VolumeTestCase(test.TestCase):
 
     def test_create_volume_from_snapshot(self):
         """Test volume can be created from a snapshot."""
-        volume_src_id = self._create_volume()
-        self.volume.create_volume(self.context, volume_src_id)
-        snapshot_id = self._create_snapshot(volume_src_id)
-        self.volume.create_snapshot(self.context, volume_src_id, snapshot_id)
-        volume_dst_id = self._create_volume(0, snapshot_id)
-        self.volume.create_volume(self.context, volume_dst_id, snapshot_id)
-        self.assertEqual(volume_dst_id, db.volume_get(
-                context.get_admin_context(),
-                volume_dst_id).id)
+        volume_src = self._create_volume()
+        self.volume.create_volume(self.context, volume_src['id'])
+        snapshot_id = self._create_snapshot(volume_src['id'])
+        self.volume.create_snapshot(self.context, volume_src['id'],
+                                    snapshot_id)
+        volume_dst = self._create_volume(0, snapshot_id)
+        self.volume.create_volume(self.context, volume_dst['id'], snapshot_id)
+        self.assertEqual(volume_dst['id'],
+                         db.volume_get(
+                             context.get_admin_context(),
+                             volume_dst['id']).id)
         self.assertEqual(snapshot_id, db.volume_get(
                 context.get_admin_context(),
-                volume_dst_id).snapshot_id)
+                volume_dst['id']).snapshot_id)
 
-        self.volume.delete_volume(self.context, volume_dst_id)
+        self.volume.delete_volume(self.context, volume_dst['id'])
         self.volume.delete_snapshot(self.context, snapshot_id)
-        self.volume.delete_volume(self.context, volume_src_id)
+        self.volume.delete_volume(self.context, volume_src['id'])
 
     def test_too_big_volume(self):
         """Ensure failure if a too large of a volume is requested."""
@@ -102,8 +106,8 @@ class VolumeTestCase(test.TestCase):
         #              volume_create
         return True
         try:
-            volume_id = self._create_volume('1001')
-            self.volume.create_volume(self.context, volume_id)
+            volume = self._create_volume('1001')
+            self.volume.create_volume(self.context, volume)
             self.fail("Should have thrown TypeError")
         except TypeError:
             pass
@@ -113,15 +117,15 @@ class VolumeTestCase(test.TestCase):
         vols = []
         total_slots = FLAGS.iscsi_num_targets
         for _index in xrange(total_slots):
-            volume_id = self._create_volume()
-            self.volume.create_volume(self.context, volume_id)
-            vols.append(volume_id)
-        volume_id = self._create_volume()
+            volume = self._create_volume()
+            self.volume.create_volume(self.context, volume['id'])
+            vols.append(volume['id'])
+        volume = self._create_volume()
         self.assertRaises(db.NoMoreTargets,
                           self.volume.create_volume,
                           self.context,
-                          volume_id)
-        db.volume_destroy(context.get_admin_context(), volume_id)
+                          volume['id'])
+        db.volume_destroy(context.get_admin_context(), volume['id'])
         for volume_id in vols:
             self.volume.delete_volume(self.context, volume_id)
 
@@ -137,7 +141,8 @@ class VolumeTestCase(test.TestCase):
         inst['ami_launch_index'] = 0
         instance_id = db.instance_create(self.context, inst)['id']
         mountpoint = "/dev/sdf"
-        volume_id = self._create_volume()
+        volume = self._create_volume()
+        volume_id = volume['id']
         self.volume.create_volume(self.context, volume_id)
         if FLAGS.fake_tests:
             db.volume_attached(self.context, volume_id, instance_id,
@@ -190,8 +195,8 @@ class VolumeTestCase(test.TestCase):
             LOG.debug(_("Target %s allocated"), iscsi_target)
         total_slots = FLAGS.iscsi_num_targets
         for _index in xrange(total_slots):
-            volume_id = self._create_volume()
-            d = self.volume.create_volume(self.context, volume_id)
+            volume = self._create_volume()
+            d = self.volume.create_volume(self.context, volume['id'])
             _check(d)
         for volume_id in volume_ids:
             self.volume.delete_volume(self.context, volume_id)
@@ -215,10 +220,10 @@ class VolumeTestCase(test.TestCase):
 
     def test_create_delete_snapshot(self):
         """Test snapshot can be created and deleted."""
-        volume_id = self._create_volume()
-        self.volume.create_volume(self.context, volume_id)
-        snapshot_id = self._create_snapshot(volume_id)
-        self.volume.create_snapshot(self.context, volume_id, snapshot_id)
+        volume = self._create_volume()
+        self.volume.create_volume(self.context, volume['id'])
+        snapshot_id = self._create_snapshot(volume['id'])
+        self.volume.create_snapshot(self.context, volume['id'], snapshot_id)
         self.assertEqual(snapshot_id,
                          db.snapshot_get(context.get_admin_context(),
                                          snapshot_id).id)
@@ -228,7 +233,7 @@ class VolumeTestCase(test.TestCase):
                           db.snapshot_get,
                           self.context,
                           snapshot_id)
-        self.volume.delete_volume(self.context, volume_id)
+        self.volume.delete_volume(self.context, volume['id'])
 
     def test_create_snapshot_force(self):
         """Test snapshot in use can be created forcibly."""
@@ -237,27 +242,28 @@ class VolumeTestCase(test.TestCase):
             pass
         self.stubs.Set(rpc, 'cast', fake_cast)
 
-        volume_id = self._create_volume()
-        self.volume.create_volume(self.context, volume_id)
-        db.volume_attached(self.context, volume_id, self.instance_id,
+        volume = self._create_volume()
+        self.volume.create_volume(self.context, volume['id'])
+        db.volume_attached(self.context, volume['id'], self.instance_id,
                            '/dev/sda1')
 
-        volume_api = volume.api.API()
+        volume_api = nova.volume.api.API()
+        volume = volume_api.get(self.context, volume['id'])
         self.assertRaises(exception.ApiError,
                           volume_api.create_snapshot,
-                          self.context, volume_id,
+                          self.context, volume,
                           'fake_name', 'fake_description')
         snapshot_ref = volume_api.create_snapshot_force(self.context,
-                                                        volume_id,
+                                                        volume,
                                                         'fake_name',
                                                         'fake_description')
         db.snapshot_destroy(self.context, snapshot_ref['id'])
-        db.volume_destroy(self.context, volume_id)
+        db.volume_destroy(self.context, volume['id'])
 
 
 class DriverTestCase(test.TestCase):
     """Base Test class for Drivers."""
-    driver_name = "nova.volume.driver.FakeAOEDriver"
+    driver_name = "nova.volume.driver.FakeBaseDriver"
 
     def setUp(self):
         super(DriverTestCase, self).setUp()
@@ -270,8 +276,7 @@ class DriverTestCase(test.TestCase):
         def _fake_execute(_command, *_args, **_kwargs):
             """Fake _execute."""
             return self.output, None
-        self.volume.driver._execute = _fake_execute
-        self.volume.driver._sync_execute = _fake_execute
+        self.volume.driver.set_execute(_fake_execute)
 
         log = logging.getLogger()
         self.stream = cStringIO.StringIO()
@@ -295,81 +300,32 @@ class DriverTestCase(test.TestCase):
             self.volume.delete_volume(self.context, volume_id)
 
 
-class AOETestCase(DriverTestCase):
-    """Test Case for AOEDriver"""
-    driver_name = "nova.volume.driver.AOEDriver"
+class VolumeDriverTestCase(DriverTestCase):
+    """Test case for VolumeDriver"""
+    driver_name = "nova.volume.driver.VolumeDriver"
 
     def setUp(self):
-        super(AOETestCase, self).setUp()
+        super(VolumeDriverTestCase, self).setUp()
 
     def tearDown(self):
-        super(AOETestCase, self).tearDown()
+        super(VolumeDriverTestCase, self).tearDown()
 
-    def _attach_volume(self):
-        """Attach volumes to an instance. This function also sets
-           a fake log message."""
-        volume_id_list = []
-        for index in xrange(3):
-            vol = {}
-            vol['size'] = 0
-            volume_id = db.volume_create(self.context,
-                                         vol)['id']
-            self.volume.create_volume(self.context, volume_id)
-
-            # each volume has a different mountpoint
-            mountpoint = "/dev/sd" + chr((ord('b') + index))
-            db.volume_attached(self.context, volume_id, self.instance_id,
-                               mountpoint)
-
-            (shelf_id, blade_id) = db.volume_get_shelf_and_blade(self.context,
-                                                                 volume_id)
-            self.output += "%s %s eth0 /dev/nova-volumes/vol-foo auto run\n" \
-                      % (shelf_id, blade_id)
-
-            volume_id_list.append(volume_id)
-
-        return volume_id_list
-
-    def test_check_for_export_with_no_volume(self):
-        """No log message when no volume is attached to an instance."""
-        self.stream.truncate(0)
-        self.volume.check_for_export(self.context, self.instance_id)
-        self.assertEqual(self.stream.getvalue(), '')
-
-    def test_check_for_export_with_all_vblade_processes(self):
-        """No log message when all the vblade processes are running."""
-        volume_id_list = self._attach_volume()
-
-        self.stream.truncate(0)
-        self.volume.check_for_export(self.context, self.instance_id)
-        self.assertEqual(self.stream.getvalue(), '')
-
-        self._detach_volume(volume_id_list)
-
-    def test_check_for_export_with_vblade_process_missing(self):
-        """Output a warning message when some vblade processes aren't
-           running."""
-        volume_id_list = self._attach_volume()
-
-        # the first vblade process isn't running
-        self.output = self.output.replace("run", "down", 1)
-        (shelf_id, blade_id) = db.volume_get_shelf_and_blade(self.context,
-                                                             volume_id_list[0])
-
-        msg_is_match = False
-        self.stream.truncate(0)
-        try:
-            self.volume.check_for_export(self.context, self.instance_id)
-        except exception.ProcessExecutionError, e:
-            volume_id = volume_id_list[0]
-            msg = _("Cannot confirm exported volume id:%(volume_id)s. "
-                    "vblade process for e%(shelf_id)s.%(blade_id)s "
-                    "isn't running.") % locals()
-
-            msg_is_match = (0 <= e.message.find(msg))
-
-        self.assertTrue(msg_is_match)
-        self._detach_volume(volume_id_list)
+    def test_delete_busy_volume(self):
+        """Test deleting a busy volume."""
+        self.stubs.Set(self.volume.driver, '_volume_not_present',
+                       lambda x: False)
+        self.stubs.Set(self.volume.driver, '_delete_volume',
+                       lambda x, y: False)
+        # Want DriverTestCase._fake_execute to return 'o' so that
+        # volume.driver.delete_volume() raises the VolumeIsBusy exception.
+        self.output = 'o'
+        self.assertRaises(exception.VolumeIsBusy,
+                          self.volume.driver.delete_volume,
+                          {'name': 'test1', 'size': 1024})
+        # when DriverTestCase._fake_execute returns something other than
+        # 'o' volume.driver.delete_volume() does not raise an exception.
+        self.output = 'x'
+        self.volume.driver.delete_volume({'name': 'test1', 'size': 1024})
 
 
 class ISCSITestCase(DriverTestCase):
@@ -408,15 +364,13 @@ class ISCSITestCase(DriverTestCase):
         self.assertEqual(self.stream.getvalue(), '')
 
     def test_check_for_export_with_all_volume_exported(self):
-        """No log message when all the vblade processes are running."""
+        """No log message when all the processes are running."""
         volume_id_list = self._attach_volume()
 
-        self.mox.StubOutWithMock(self.volume.driver, '_execute')
+        self.mox.StubOutWithMock(self.volume.driver.tgtadm, 'show_target')
         for i in volume_id_list:
             tid = db.volume_get_iscsi_target_num(self.context, i)
-            self.volume.driver._execute("ietadm", "--op", "show",
-                                        "--tid=%(tid)d" % locals(),
-                                        run_as_root=True)
+            self.volume.driver.tgtadm.show_target(tid)
 
         self.stream.truncate(0)
         self.mox.ReplayAll()
@@ -431,13 +385,10 @@ class ISCSITestCase(DriverTestCase):
            by ietd."""
         volume_id_list = self._attach_volume()
 
-        # the first vblade process isn't running
         tid = db.volume_get_iscsi_target_num(self.context, volume_id_list[0])
-        self.mox.StubOutWithMock(self.volume.driver, '_execute')
-        self.volume.driver._execute("ietadm", "--op", "show",
-                                    "--tid=%(tid)d" % locals(),
-                                    run_as_root=True).AndRaise(
-                                            exception.ProcessExecutionError())
+        self.mox.StubOutWithMock(self.volume.driver.tgtadm, 'show_target')
+        self.volume.driver.tgtadm.show_target(tid).AndRaise(
+            exception.ProcessExecutionError())
 
         self.mox.ReplayAll()
         self.assertRaises(exception.ProcessExecutionError,
@@ -449,3 +400,47 @@ class ISCSITestCase(DriverTestCase):
         self.mox.UnsetStubs()
 
         self._detach_volume(volume_id_list)
+
+
+class VolumePolicyTestCase(test.TestCase):
+
+    def setUp(self):
+        super(VolumePolicyTestCase, self).setUp()
+
+        nova.policy.reset()
+        nova.policy.init()
+
+        self.context = context.get_admin_context()
+        self.volume_api = nova.volume.api.API()
+
+    def tearDown(self):
+        super(VolumePolicyTestCase, self).tearDown()
+        nova.policy.reset()
+
+    def _set_rules(self, rules):
+        nova.common.policy.set_brain(nova.common.policy.HttpBrain(rules))
+
+    def test_check_policy(self):
+        self.mox.StubOutWithMock(nova.policy, 'enforce')
+        target = {
+            'project_id': self.context.project_id,
+            'user_id': self.context.user_id,
+        }
+        nova.policy.enforce(self.context, 'volume:attach', target)
+        self.mox.ReplayAll()
+        nova.volume.api.check_policy(self.context, 'attach')
+        self.mox.UnsetStubs()
+        self.mox.VerifyAll()
+
+    def test_check_policy_with_target(self):
+        self.mox.StubOutWithMock(nova.policy, 'enforce')
+        target = {
+            'project_id': self.context.project_id,
+            'user_id': self.context.user_id,
+            'id': 2,
+        }
+        nova.policy.enforce(self.context, 'volume:attach', target)
+        self.mox.ReplayAll()
+        nova.volume.api.check_policy(self.context, 'attach', {'id': 2})
+        self.mox.UnsetStubs()
+        self.mox.VerifyAll()

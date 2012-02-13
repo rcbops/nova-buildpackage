@@ -29,9 +29,11 @@ REBUILDING = 'rebuilding'
 
 PAUSED = 'paused'
 SUSPENDED = 'suspended'
+SHUTOFF = 'shutoff'
 RESCUED = 'rescued'
 DELETED = 'deleted'
 STOPPED = 'stopped'
+SOFT_DELETE = 'soft-delete'
 
 MIGRATING = 'migrating'
 RESIZING = 'resizing'

@@ -24,7 +24,7 @@
    :platform: Unix
 .. moduleauthor:: Jesse Andrews <jesse@ansolabs.com>
 .. moduleauthor:: Devin Carlen <devin.carlen@gmail.com>
-.. moduleauthor:: Vishvananda Ishaya <vishvananda@yahoo.com>
+.. moduleauthor:: Vishvananda Ishaya <vishvananda@gmail.com>
 .. moduleauthor:: Joshua McKenty <joshua@cognition.ca>
 .. moduleauthor:: Manish Singh <yosh@gimp.org>
 .. moduleauthor:: Andy Smith <andy@anarkystic.com>
@@ -63,6 +63,7 @@ def setup():
                             num_networks=FLAGS.num_networks,
                             network_size=FLAGS.network_size,
                             cidr_v6=FLAGS.fixed_range_v6,
+                            gateway=FLAGS.gateway,
                             gateway_v6=FLAGS.gateway_v6,
                             bridge=FLAGS.flat_network_bridge,
                             bridge_interface=bridge_interface,

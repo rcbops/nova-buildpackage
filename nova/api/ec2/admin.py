@@ -21,18 +21,20 @@ Admin API controller, exposed through http via the api worker.
 """
 
 import base64
-import netaddr
 import urllib
 
+import netaddr
+
+from nova.api.ec2 import ec2utils
+from nova.auth import manager
 from nova import compute
+from nova.compute import instance_types
+from nova.compute import vm_states
 from nova import db
 from nova import exception
 from nova import flags
 from nova import log as logging
 from nova import utils
-from nova.api.ec2 import ec2utils
-from nova.auth import manager
-from nova.compute import vm_states
 
 
 FLAGS = flags.FLAGS
@@ -87,7 +89,7 @@ def instance_dict(inst):
     return {'name': inst['name'],
             'memory_mb': inst['memory_mb'],
             'vcpus': inst['vcpus'],
-            'disk_gb': inst['local_gb'],
+            'disk_gb': inst['root_gb'],
             'flavor_id': inst['flavorid']}
 
 
@@ -126,8 +128,9 @@ class AdminController(object):
 
     def describe_instance_types(self, context, **_kwargs):
         """Returns all active instance types data (vcpus, memory, etc.)"""
-        return {'instanceTypeSet': [instance_dict(v) for v in
-                                   db.instance_type_get_all(context).values()]}
+        inst_types = instance_types.get_all_types()
+        inst_type_dicts = [instance_dict(i) for i in inst_types.values()]
+        return {'instanceTypeSet': inst_type_dicts}
 
     def describe_user(self, _context, name, **_kwargs):
         """Returns user data, including access and secret keys."""

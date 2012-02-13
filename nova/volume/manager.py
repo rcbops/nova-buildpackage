@@ -28,20 +28,15 @@ intact.
 :volume_topic:  What :mod:`rpc` topic to listen to (default: `volume`).
 :volume_manager:  The module name of a class derived from
                   :class:`manager.Manager` (default:
-                  :class:`nova.volume.manager.AOEManager`).
+                  :class:`nova.volume.manager.Manager`).
 :storage_availability_zone:  Defaults to `nova`.
-:volume_driver:  Used by :class:`AOEManager`.  Defaults to
-                 :class:`nova.volume.driver.AOEDriver`.
-:num_shelves:  Number of shelves for AoE (default: 100).
-:num_blades:  Number of vblades per shelf to allocate AoE storage from
-              (default: 16).
+:volume_driver:  Used by :class:`Manager`.  Defaults to
+                 :class:`nova.volume.driver.ISCSIDriver`.
 :volume_group:  Name of the group that will contain exported volumes (default:
                 `nova-volumes`)
-:aoe_eth_dev:  Device name the volumes will be exported on (default: `eth0`).
-:num_shell_tries:  Number of times to attempt to run AoE commands (default: 3)
+:num_shell_tries:  Number of times to attempt to run commands (default: 3)
 
 """
-
 
 from nova import context
 from nova import exception
@@ -83,8 +78,11 @@ class VolumeManager(manager.SchedulerDependentManager):
     def init_host(self):
         """Do any initialization that needs to be run if this is a
            standalone service."""
-        self.driver.check_for_setup_error()
+
         ctxt = context.get_admin_context()
+        self.driver.do_setup(ctxt)
+        self.driver.check_for_setup_error()
+
         volumes = self.db.volume_get_all_by_host(ctxt, self.host)
         LOG.debug(_("Re-exporting %s volumes"), len(volumes))
         for volume in volumes:
@@ -111,7 +109,7 @@ class VolumeManager(manager.SchedulerDependentManager):
             vol_size = volume_ref['size']
             LOG.debug(_("volume %(vol_name)s: creating lv of"
                     " size %(vol_size)sG") % locals())
-            if snapshot_id == None:
+            if snapshot_id is None:
                 model_update = self.driver.create_volume(volume_ref)
             else:
                 snapshot_ref = self.db.snapshot_get(context, snapshot_id)
@@ -126,10 +124,10 @@ class VolumeManager(manager.SchedulerDependentManager):
             if model_update:
                 self.db.volume_update(context, volume_ref['id'], model_update)
         except Exception:
-            self.db.volume_update(context,
-                                  volume_ref['id'], {'status': 'error'})
-            self._notify_vsa(context, volume_ref, 'error')
-            raise
+            with utils.save_and_reraise_exception():
+                self.db.volume_update(context,
+                                      volume_ref['id'], {'status': 'error'})
+                self._notify_vsa(context, volume_ref, 'error')
 
         now = utils.utcnow()
         self.db.volume_update(context,
@@ -181,10 +179,10 @@ class VolumeManager(manager.SchedulerDependentManager):
                                   {'status': 'available'})
             return True
         except Exception:
-            self.db.volume_update(context,
-                                  volume_ref['id'],
-                                  {'status': 'error_deleting'})
-            raise
+            with utils.save_and_reraise_exception():
+                self.db.volume_update(context,
+                                      volume_ref['id'],
+                                      {'status': 'error_deleting'})
 
         self.db.volume_destroy(context, volume_id)
         LOG.debug(_("volume %s: deleted successfully"), volume_ref['name'])
@@ -205,9 +203,10 @@ class VolumeManager(manager.SchedulerDependentManager):
                                         model_update)
 
         except Exception:
-            self.db.snapshot_update(context,
-                                    snapshot_ref['id'], {'status': 'error'})
-            raise
+            with utils.save_and_reraise_exception():
+                self.db.snapshot_update(context,
+                                        snapshot_ref['id'],
+                                        {'status': 'error'})
 
         self.db.snapshot_update(context,
                                 snapshot_ref['id'], {'status': 'available',
@@ -224,56 +223,59 @@ class VolumeManager(manager.SchedulerDependentManager):
             LOG.debug(_("snapshot %s: deleting"), snapshot_ref['name'])
             self.driver.delete_snapshot(snapshot_ref)
         except Exception:
-            self.db.snapshot_update(context,
-                                    snapshot_ref['id'],
-                                    {'status': 'error_deleting'})
-            raise
+            with utils.save_and_reraise_exception():
+                self.db.snapshot_update(context,
+                                        snapshot_ref['id'],
+                                        {'status': 'error_deleting'})
 
         self.db.snapshot_destroy(context, snapshot_id)
         LOG.debug(_("snapshot %s: deleted successfully"), snapshot_ref['name'])
         return True
 
-    def setup_compute_volume(self, context, volume_id):
-        """Setup remote volume on compute host.
+    def attach_volume(self, context, volume_id, instance_id, mountpoint):
+        """Updates db to show volume is attached"""
+        # TODO(vish): refactor this into a more general "reserve"
+        self.db.volume_attached(context,
+                                volume_id,
+                                instance_id,
+                                mountpoint)
 
-        Returns path to device."""
-        context = context.elevated()
-        volume_ref = self.db.volume_get(context, volume_id)
-        if volume_ref['host'] == self.host and FLAGS.use_local_volumes:
-            path = self.driver.local_path(volume_ref)
-        else:
-            path = self.driver.discover_volume(context, volume_ref)
-        return path
+    def detach_volume(self, context, volume_id):
+        """Updates db to show volume is detached"""
+        # TODO(vish): refactor this into a more general "unreserve"
+        self.db.volume_detached(context, volume_id)
 
-    def remove_compute_volume(self, context, volume_id):
-        """Remove remote volume on compute host."""
-        context = context.elevated()
+    def initialize_connection(self, context, volume_id, address):
+        """Initialize volume to be connected from address.
+
+        This method calls the driver initialize_connection and returns
+        it to the caller.  The driver is responsible for doing any
+        necessary security setup and returning a connection_info dictionary
+        in the following format:
+            {'driver_volume_type': driver_volume_type
+             'data': data}
+
+        driver_volume_type: a string to identify the type of volume.  This
+                           can be used by the calling code to determine the
+                           strategy for connecting to the volume. This could
+                           be 'iscsi', 'rbd', 'sheepdog', etc.
+        data: this is the data that the calling code will use to connect
+              to the volume. Keep in mind that this will be serialized to
+              json in various places, so it should not contain any non-json
+              data types.
+        """
         volume_ref = self.db.volume_get(context, volume_id)
-        if volume_ref['host'] == self.host and FLAGS.use_local_volumes:
-            return True
-        else:
-            self.driver.undiscover_volume(volume_ref)
+        return self.driver.initialize_connection(volume_ref, address)
+
+    def terminate_connection(self, context, volume_id, address):
+        volume_ref = self.db.volume_get(context, volume_id)
+        self.driver.terminate_connection(volume_ref, address)
 
     def check_for_export(self, context, instance_id):
         """Make sure whether volume is exported."""
         instance_ref = self.db.instance_get(context, instance_id)
         for volume in instance_ref['volumes']:
             self.driver.check_for_export(context, volume['id'])
-
-    def periodic_tasks(self, context=None):
-        """Tasks to be run at a periodic interval."""
-
-        error_list = []
-        try:
-            self._report_driver_status()
-        except Exception as ex:
-            LOG.warning(_("Error during report_driver_status(): %s"),
-                        unicode(ex))
-            error_list.append(ex)
-
-        super(VolumeManager, self).periodic_tasks(context)
-
-        return error_list
 
     def _volume_stats_changed(self, stat1, stat2):
         if FLAGS.volume_force_update_capabilities:
@@ -285,7 +287,8 @@ class VolumeManager(manager.SchedulerDependentManager):
                 return True
         return False
 
-    def _report_driver_status(self):
+    @manager.periodic_task
+    def _report_driver_status(self, context):
         volume_stats = self.driver.get_volume_stats(refresh=True)
         if volume_stats:
             LOG.info(_("Checking volume capabilities"))

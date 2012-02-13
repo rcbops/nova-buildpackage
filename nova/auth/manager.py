@@ -76,13 +76,16 @@ flags.DEFINE_string('credential_rc_file', '%src',
 flags.DEFINE_string('auth_driver', 'nova.auth.dbdriver.DbDriver',
                     'Driver that auth manager uses')
 
+flags.DECLARE('osapi_compute_listen_port', 'nova.service')
+
+
 LOG = logging.getLogger('nova.auth.manager')
 
 
 if FLAGS.memcached_servers:
     import memcache
 else:
-    from nova import fakememcache as memcache
+    from nova.testing.fake import memcache
 
 
 class AuthBase(object):
@@ -99,7 +102,7 @@ class AuthBase(object):
 
         This method will return the id of the object if the object
         is of this class, otherwise it will return the original object.
-        This allows methods to accept objects or ids as paramaters.
+        This allows methods to accept objects or ids as parameters.
         """
         if isinstance(obj, cls):
             return obj.id
@@ -692,7 +695,7 @@ class AuthManager(object):
 
         @type admin: bool
         @param admin: Whether to set the admin flag. The admin flag gives
-        superuser status regardless of roles specifed for the user.
+        superuser status regardless of roles specified for the user.
 
         @type create_project: bool
         @param: Whether to create a project for the user with the same name.
@@ -827,7 +830,7 @@ class AuthManager(object):
                    's3': 'http://%s:%s' % (s3_host, FLAGS.s3_port),
                    'os': '%s://%s:%s%s' % (FLAGS.osapi_scheme,
                                             ec2_host,
-                                            FLAGS.osapi_port,
+                                            FLAGS.osapi_compute_listen_port,
                                             FLAGS.osapi_path),
                    'user': user.name,
                    'nova': FLAGS.ca_file,

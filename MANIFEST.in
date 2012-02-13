@@ -1,17 +1,15 @@
 include HACKING LICENSE run_tests.py run_tests.sh
-include README builddeb.sh exercise_rsapi.py
-include ChangeLog MANIFEST.in pylintrc Authors
+include README exercise_rsapi.py
+include MANIFEST.in pylintrc Authors
 graft nova/CA
 graft doc
 graft smoketests
 graft tools
 graft etc
-graft bzrplugins
 graft contrib
 graft po
 graft plugins
 graft nova/api/openstack/schemas
-include nova/api/openstack/notes.txt
 include nova/auth/*.schema
 include nova/auth/novarc.template
 include nova/auth/opendj.sh
@@ -37,8 +35,9 @@ include nova/tests/bundle/1mb.manifest.xml
 include nova/tests/bundle/1mb.no_kernel_or_ramdisk.manifest.xml
 include nova/tests/bundle/1mb.part.0
 include nova/tests/bundle/1mb.part.1
-include nova/tests/public_key/*
+include nova/tests/api/ec2/public_key/*
 include nova/tests/db/nova.austin.sqlite
+include nova/tests/image/*.tar.gz
 include plugins/xenapi/README
 include plugins/xenapi/etc/xapi.d/plugins/objectstore
 include plugins/xenapi/etc/xapi.d/plugins/pluginlib_nova.py

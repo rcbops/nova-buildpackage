@@ -19,13 +19,14 @@
 
 """VIF drivers for libvirt."""
 
+from nova import exception
 from nova import flags
 from nova import log as logging
 from nova.network import linux_net
-from nova.virt.libvirt import netutils
 from nova import utils
+from nova.virt import netutils
 from nova.virt.vif import VIFDriver
-from nova import exception
+
 
 LOG = logging.getLogger('nova.virt.libvirt.vif')
 
@@ -41,11 +42,11 @@ class LibvirtBridgeDriver(VIFDriver):
     def _get_configurations(self, network, mapping):
         """Get a dictionary of VIF configurations for bridge type."""
         # Assume that the gateway also acts as the dhcp server.
-        gateway6 = mapping.get('gateway6')
+        gateway_v6 = mapping.get('gateway_v6')
         mac_id = mapping['mac'].replace(':', '')
 
         if FLAGS.allow_same_net_traffic:
-            template = "<parameter name=\"%s\"value=\"%s\" />\n"
+            template = "<parameter name=\"%s\" value=\"%s\" />\n"
             net, mask = netutils.get_net_and_mask(network['cidr'])
             values = [("PROJNET", net), ("PROJMASK", mask)]
             if FLAGS.use_ipv6:
@@ -67,8 +68,8 @@ class LibvirtBridgeDriver(VIFDriver):
             'extra_params': extra_params,
         }
 
-        if gateway6:
-            result['gateway6'] = gateway6 + "/128"
+        if gateway_v6:
+            result['gateway_v6'] = gateway_v6 + "/128"
 
         return result
 
@@ -107,8 +108,17 @@ class LibvirtOpenVswitchDriver(VIFDriver):
         iface_id = mapping['vif_uuid']
         dev = self.get_dev_name(iface_id)
         if not linux_net._device_exists(dev):
-            utils.execute('ip', 'tuntap', 'add', dev, 'mode', 'tap',
+            # Older version of the command 'ip' from the iproute2 package
+            # don't have support for the tuntap option (lp:882568).  If it
+            # turns out we're on an old version we work around this by using
+            # tunctl.
+            try:
+                # First, try with 'ip'
+                utils.execute('ip', 'tuntap', 'add', dev, 'mode', 'tap',
                           run_as_root=True)
+            except exception.ProcessExecutionError:
+                # Second option: tunctl
+                utils.execute('tunctl', '-b', '-t', dev, run_as_root=True)
             utils.execute('ip', 'link', 'set', dev, 'up', run_as_root=True)
         utils.execute('ovs-vsctl', '--', '--may-exist', 'add-port',
                 FLAGS.libvirt_ovs_bridge, dev,

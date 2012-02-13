@@ -24,7 +24,6 @@ import webob.exc
 
 from nova import test
 from nova.api.openstack import common
-from nova.api.openstack import faults
 from nova.api.openstack import wsgi
 
 
@@ -38,27 +37,6 @@ class TestFaults(test.TestCase):
         xml_string = xml_string.replace("\t", "")
         return xml_string
 
-    def test_400_fault_xml(self):
-        """Test fault serialized to XML via file-extension and/or header."""
-        requests = [
-            webob.Request.blank('/.xml'),
-            webob.Request.blank('/', headers={"Accept": "application/xml"}),
-        ]
-
-        for request in requests:
-            fault = faults.Fault(webob.exc.HTTPBadRequest(explanation='scram'))
-            response = request.get_response(fault)
-
-            expected = self._prepare_xml("""
-                <badRequest code="400" xmlns="%s">
-                    <message>scram</message>
-                </badRequest>
-            """ % common.XML_NS_V10)
-            actual = self._prepare_xml(response.body)
-
-            self.assertEqual(response.content_type, "application/xml")
-            self.assertEqual(expected, actual)
-
     def test_400_fault_json(self):
         """Test fault serialized to JSON via file-extension and/or header."""
         requests = [
@@ -67,7 +45,7 @@ class TestFaults(test.TestCase):
         ]
 
         for request in requests:
-            fault = faults.Fault(webob.exc.HTTPBadRequest(explanation='scram'))
+            fault = wsgi.Fault(webob.exc.HTTPBadRequest(explanation='scram'))
             response = request.get_response(fault)
 
             expected = {
@@ -81,30 +59,6 @@ class TestFaults(test.TestCase):
             self.assertEqual(response.content_type, "application/json")
             self.assertEqual(expected, actual)
 
-    def test_413_fault_xml(self):
-        requests = [
-            webob.Request.blank('/.xml'),
-            webob.Request.blank('/', headers={"Accept": "application/xml"}),
-        ]
-
-        for request in requests:
-            exc = webob.exc.HTTPRequestEntityTooLarge
-            fault = faults.Fault(exc(explanation='sorry',
-                        headers={'Retry-After': 4}))
-            response = request.get_response(fault)
-
-            expected = self._prepare_xml("""
-                <overLimit code="413" xmlns="%s">
-                    <message>sorry</message>
-                    <retryAfter>4</retryAfter>
-                </overLimit>
-            """ % common.XML_NS_V10)
-            actual = self._prepare_xml(response.body)
-
-            self.assertEqual(expected, actual)
-            self.assertEqual(response.content_type, "application/xml")
-            self.assertEqual(response.headers['Retry-After'], 4)
-
     def test_413_fault_json(self):
         """Test fault serialized to JSON via file-extension and/or header."""
         requests = [
@@ -114,7 +68,7 @@ class TestFaults(test.TestCase):
 
         for request in requests:
             exc = webob.exc.HTTPRequestEntityTooLarge
-            fault = faults.Fault(exc(explanation='sorry',
+            fault = wsgi.Fault(exc(explanation='sorry',
                         headers={'Retry-After': 4}))
             response = request.get_response(fault)
 
@@ -134,7 +88,7 @@ class TestFaults(test.TestCase):
         """Ensure the ability to raise `Fault`s in WSGI-ified methods."""
         @webob.dec.wsgify
         def raiser(req):
-            raise faults.Fault(webob.exc.HTTPNotFound(explanation='whut?'))
+            raise wsgi.Fault(webob.exc.HTTPNotFound(explanation='whut?'))
 
         req = webob.Request.blank('/.xml')
         resp = req.get_response(raiser)
@@ -144,27 +98,15 @@ class TestFaults(test.TestCase):
 
     def test_fault_has_status_int(self):
         """Ensure the status_int is set correctly on faults"""
-        fault = faults.Fault(webob.exc.HTTPBadRequest(explanation='what?'))
+        fault = wsgi.Fault(webob.exc.HTTPBadRequest(explanation='what?'))
         self.assertEqual(fault.status_int, 400)
 
-    def test_v10_xml_serializer(self):
-        """Ensure that a v1.0 request responds with a v1.0 xmlns"""
-        request = webob.Request.blank('/',
-                                      headers={"Accept": "application/xml"})
-
-        fault = faults.Fault(webob.exc.HTTPBadRequest(explanation='scram'))
-        response = request.get_response(fault)
-
-        self.assertTrue(common.XML_NS_V10 in response.body)
-        self.assertEqual(response.content_type, "application/xml")
-        self.assertEqual(response.status_int, 400)
-
-    def test_v11_xml_serializer(self):
+    def test_xml_serializer(self):
         """Ensure that a v1.1 request responds with a v1.1 xmlns"""
         request = webob.Request.blank('/v1.1',
                                       headers={"Accept": "application/xml"})
 
-        fault = faults.Fault(webob.exc.HTTPBadRequest(explanation='scram'))
+        fault = wsgi.Fault(webob.exc.HTTPBadRequest(explanation='scram'))
         response = request.get_response(fault)
 
         self.assertTrue(common.XML_NS_V11 in response.body)

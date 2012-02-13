@@ -20,14 +20,15 @@ Drivers for volumes.
 
 """
 
-import time
 import os
+import time
 from xml.etree import ElementTree
 
 from nova import exception
 from nova import flags
 from nova import log as logging
 from nova import utils
+from nova.volume import iscsi
 from nova.volume import volume_types
 
 
@@ -35,37 +36,32 @@ LOG = logging.getLogger("nova.volume.driver")
 FLAGS = flags.FLAGS
 flags.DEFINE_string('volume_group', 'nova-volumes',
                     'Name for the VG that will contain exported volumes')
-flags.DEFINE_string('aoe_eth_dev', 'eth0',
-                    'Which device to export the volumes on')
 flags.DEFINE_string('num_shell_tries', 3,
                     'number of times to attempt to run flakey shell commands')
 flags.DEFINE_string('num_iscsi_scan_tries', 3,
                     'number of times to rescan iSCSI target to find volume')
-flags.DEFINE_integer('num_shelves',
-                    100,
-                    'Number of vblade shelves')
-flags.DEFINE_integer('blades_per_shelf',
-                    16,
-                    'Number of vblade blades per shelf')
 flags.DEFINE_integer('iscsi_num_targets',
                     100,
                     'Number of iscsi target ids per host')
 flags.DEFINE_string('iscsi_target_prefix', 'iqn.2010-10.org.openstack:',
                     'prefix for iscsi volumes')
-flags.DEFINE_string('iscsi_ip_prefix', '$my_ip',
-                    'discover volumes on the ip that starts with this prefix')
+flags.DEFINE_string('iscsi_ip_address', '$my_ip',
+                    'use this ip for iscsi')
+flags.DEFINE_integer('iscsi_port', 3260,
+                     'The port that the iSCSI daemon is listening on')
 flags.DEFINE_string('rbd_pool', 'rbd',
                     'the rbd pool in which volumes are stored')
 
 
 class VolumeDriver(object):
     """Executes commands relating to Volumes."""
-    def __init__(self, execute=utils.execute,
-                 sync_exec=utils.execute, *args, **kwargs):
+    def __init__(self, execute=utils.execute, *args, **kwargs):
         # NOTE(vish): db is set by Manager
         self.db = None
+        self.set_execute(execute)
+
+    def set_execute(self, execute):
         self._execute = execute
-        self._sync_exec = sync_exec
 
     def _try_execute(self, *command, **kwargs):
         # NOTE(vish): Volume commands can partially fail due to timing, but
@@ -202,16 +198,16 @@ class VolumeDriver(object):
         """Removes an export for a logical volume."""
         raise NotImplementedError()
 
-    def discover_volume(self, context, volume):
-        """Discover volume on a remote host."""
-        raise NotImplementedError()
-
-    def undiscover_volume(self, volume):
-        """Undiscover volume on a remote host."""
-        raise NotImplementedError()
-
     def check_for_export(self, context, volume_id):
         """Make sure volume is exported."""
+        raise NotImplementedError()
+
+    def initialize_connection(self, volume, address):
+        """Allow connection to ip and return connection info."""
+        raise NotImplementedError()
+
+    def terminate_connection(self, volume, address):
+        """Disallow connection from ip"""
         raise NotImplementedError()
 
     def get_volume_stats(self, refresh=False):
@@ -219,127 +215,9 @@ class VolumeDriver(object):
            True, run the update first."""
         return None
 
-
-class AOEDriver(VolumeDriver):
-    """WARNING! Deprecated. This driver will be removed in Essex. Its use
-    is not recommended.
-
-    Implements AOE specific volume commands."""
-
-    def __init__(self, *args, **kwargs):
-        LOG.warn(_("AOEDriver is deprecated and will be removed in Essex"))
-        super(AOEDriver, self).__init__(*args, **kwargs)
-
-    def ensure_export(self, context, volume):
-        # NOTE(vish): we depend on vblade-persist for recreating exports
+    def do_setup(self, context):
+        """Any initialization the volume driver does while starting"""
         pass
-
-    def _ensure_blades(self, context):
-        """Ensure that blades have been created in datastore."""
-        total_blades = FLAGS.num_shelves * FLAGS.blades_per_shelf
-        if self.db.export_device_count(context) >= total_blades:
-            return
-        for shelf_id in xrange(FLAGS.num_shelves):
-            for blade_id in xrange(FLAGS.blades_per_shelf):
-                dev = {'shelf_id': shelf_id, 'blade_id': blade_id}
-                self.db.export_device_create_safe(context, dev)
-
-    def create_export(self, context, volume):
-        """Creates an export for a logical volume."""
-        self._ensure_blades(context)
-        (shelf_id,
-         blade_id) = self.db.volume_allocate_shelf_and_blade(context,
-                                                             volume['id'])
-        self._try_execute(
-                 'vblade-persist', 'setup',
-                 shelf_id,
-                 blade_id,
-                 FLAGS.aoe_eth_dev,
-                 "/dev/%s/%s" %
-                 (FLAGS.volume_group,
-                  volume['name']),
-                 run_as_root=True)
-        # NOTE(vish): The standard _try_execute does not work here
-        #             because these methods throw errors if other
-        #             volumes on this host are in the process of
-        #             being created.  The good news is the command
-        #             still works for the other volumes, so we
-        #             just wait a bit for the current volume to
-        #             be ready and ignore any errors.
-        time.sleep(2)
-        self._execute('vblade-persist', 'auto', 'all',
-                      check_exit_code=False, run_as_root=True)
-        self._execute('vblade-persist', 'start', 'all',
-                      check_exit_code=False, run_as_root=True)
-
-    def remove_export(self, context, volume):
-        """Removes an export for a logical volume."""
-        (shelf_id,
-         blade_id) = self.db.volume_get_shelf_and_blade(context,
-                                                        volume['id'])
-        self._try_execute('vblade-persist', 'stop',
-                          shelf_id, blade_id, run_as_root=True)
-        self._try_execute('vblade-persist', 'destroy',
-                          shelf_id, blade_id, run_as_root=True)
-
-    def discover_volume(self, context, _volume):
-        """Discover volume on a remote host."""
-        (shelf_id,
-         blade_id) = self.db.volume_get_shelf_and_blade(context,
-                                                        _volume['id'])
-        self._execute('aoe-discover', run_as_root=True)
-        out, err = self._execute('aoe-stat', check_exit_code=False,
-                                 run_as_root=True)
-        device_path = 'e%(shelf_id)d.%(blade_id)d' % locals()
-        if out.find(device_path) >= 0:
-            return "/dev/etherd/%s" % device_path
-        else:
-            return
-
-    def undiscover_volume(self, _volume):
-        """Undiscover volume on a remote host."""
-        pass
-
-    def check_for_export(self, context, volume_id):
-        """Make sure volume is exported."""
-        (shelf_id,
-         blade_id) = self.db.volume_get_shelf_and_blade(context,
-                                                        volume_id)
-        cmd = ('vblade-persist', 'ls', '--no-header')
-        out, _err = self._execute(*cmd, run_as_root=True)
-        exported = False
-        for line in out.split('\n'):
-            param = line.split(' ')
-            if len(param) == 6 and param[0] == str(shelf_id) \
-                    and param[1] == str(blade_id) and param[-1] == "run":
-                exported = True
-                break
-        if not exported:
-            # Instance will be terminated in this case.
-            desc = _("Cannot confirm exported volume id:%(volume_id)s. "
-                     "vblade process for e%(shelf_id)s.%(blade_id)s "
-                     "isn't running.") % locals()
-            raise exception.ProcessExecutionError(out, _err, cmd=cmd,
-                                                  description=desc)
-
-
-class FakeAOEDriver(AOEDriver):
-    """Logs calls instead of executing."""
-
-    def __init__(self, *args, **kwargs):
-        super(FakeAOEDriver, self).__init__(execute=self.fake_execute,
-                                            sync_exec=self.fake_execute,
-                                            *args, **kwargs)
-
-    def check_for_setup_error(self):
-        """No setup necessary in fake mode."""
-        pass
-
-    @staticmethod
-    def fake_execute(cmd, *_args, **_kwargs):
-        """Execute that simply logs the command."""
-        LOG.debug(_("FAKE AOE: %s"), cmd)
-        return (None, None)
 
 
 class ISCSIDriver(VolumeDriver):
@@ -356,6 +234,14 @@ class ISCSIDriver(VolumeDriver):
                        `CHAP` is the only auth_method in use at the moment.
     """
 
+    def __init__(self, *args, **kwargs):
+        self.tgtadm = iscsi.get_target_admin()
+        super(ISCSIDriver, self).__init__(*args, **kwargs)
+
+    def set_execute(self, execute):
+        super(ISCSIDriver, self).set_execute(execute)
+        self.tgtadm.set_execute(execute)
+
     def ensure_export(self, context, volume):
         """Synchronously recreates an export for a logical volume."""
         try:
@@ -368,19 +254,10 @@ class ISCSIDriver(VolumeDriver):
 
         iscsi_name = "%s%s" % (FLAGS.iscsi_target_prefix, volume['name'])
         volume_path = "/dev/%s/%s" % (FLAGS.volume_group, volume['name'])
-        self._sync_exec('ietadm', '--op', 'new',
-                        "--tid=%s" % iscsi_target,
-                        '--params',
-                        "Name=%s" % iscsi_name,
-                        run_as_root=True,
-                        check_exit_code=False)
-        self._sync_exec('ietadm', '--op', 'new',
-                        "--tid=%s" % iscsi_target,
-                        '--lun=0',
-                        '--params',
-                        "Path=%s,Type=fileio" % volume_path,
-                        run_as_root=True,
-                        check_exit_code=False)
+
+        self.tgtadm.new_target(iscsi_name, iscsi_target, check_exit_code=False)
+        self.tgtadm.new_logicalunit(iscsi_target, 0, volume_path,
+                                    check_exit_code=False)
 
     def _ensure_iscsi_targets(self, context, host):
         """Ensure that target ids have been created in datastore."""
@@ -400,13 +277,14 @@ class ISCSIDriver(VolumeDriver):
                                                       volume['host'])
         iscsi_name = "%s%s" % (FLAGS.iscsi_target_prefix, volume['name'])
         volume_path = "/dev/%s/%s" % (FLAGS.volume_group, volume['name'])
-        self._execute('ietadm', '--op', 'new',
-                      '--tid=%s' % iscsi_target,
-                      '--params', 'Name=%s' % iscsi_name, run_as_root=True)
-        self._execute('ietadm', '--op', 'new',
-                      '--tid=%s' % iscsi_target,
-                      '--lun=0', '--params',
-                      'Path=%s,Type=fileio' % volume_path, run_as_root=True)
+
+        self.tgtadm.new_target(iscsi_name, iscsi_target)
+        self.tgtadm.new_logicalunit(iscsi_target, 0, volume_path)
+
+        model_update = {}
+        model_update['provider_location'] = _iscsi_location(
+            FLAGS.iscsi_ip_address, iscsi_target, iscsi_name)
+        return model_update
 
     def remove_export(self, context, volume):
         """Removes an export for a logical volume."""
@@ -421,18 +299,14 @@ class ISCSIDriver(VolumeDriver):
         try:
             # ietadm show will exit with an error
             # this export has already been removed
-            self._execute('ietadm', '--op', 'show',
-                          '--tid=%s' % iscsi_target, run_as_root=True)
+            self.tgtadm.show_target(iscsi_target)
         except Exception as e:
             LOG.info(_("Skipping remove_export. No iscsi_target " +
                        "is presently exported for volume: %d"), volume['id'])
             return
 
-        self._execute('ietadm', '--op', 'delete',
-                      '--tid=%s' % iscsi_target,
-                      '--lun=0', run_as_root=True)
-        self._execute('ietadm', '--op', 'delete',
-                      '--tid=%s' % iscsi_target, run_as_root=True)
+        self.tgtadm.delete_logicalunit(iscsi_target, 0)
+        self.tgtadm.delete_target(iscsi_target)
 
     def _do_iscsi_discovery(self, volume):
         #TODO(justinsb): Deprecate discovery and use stored info
@@ -445,7 +319,7 @@ class ISCSIDriver(VolumeDriver):
                                     '-t', 'sendtargets', '-p', volume['host'],
                                     run_as_root=True)
         for target in out.splitlines():
-            if FLAGS.iscsi_ip_prefix in target and volume_name in target:
+            if FLAGS.iscsi_ip_address in target and volume_name in target:
                 return target
         return None
 
@@ -461,6 +335,8 @@ class ISCSIDriver(VolumeDriver):
         :target_iqn:    the IQN of the iSCSI target
 
         :target_portal:    the portal of the iSCSI target
+
+        :volume_id:    the id of the volume (currently used by xen)
 
         :auth_method:, :auth_username:, :auth_password:
 
@@ -491,6 +367,7 @@ class ISCSIDriver(VolumeDriver):
 
         iscsi_portal = iscsi_target.split(",")[0]
 
+        properties['volume_id'] = volume['id']
         properties['target_iqn'] = iscsi_name
         properties['target_portal'] = iscsi_portal
 
@@ -519,72 +396,39 @@ class ISCSIDriver(VolumeDriver):
                          '-v', property_value)
         return self._run_iscsiadm(iscsi_properties, iscsi_command)
 
-    def discover_volume(self, context, volume):
-        """Discover volume on a remote host."""
+    def initialize_connection(self, volume, address):
+        """Initializes the connection and returns connection info.
+
+        The iscsi driver returns a driver_volume_type of 'iscsi'.
+        The format of the driver data is defined in _get_iscsi_properties.
+        Example return value:
+            {
+                'driver_volume_type': 'iscsi'
+                'data': {
+                    'target_discovered': True,
+                    'target_iqn': 'iqn.2010-10.org.openstack:volume-00000001',
+                    'target_portal': '127.0.0.0.1:3260',
+                    'volume_id': 1,
+                }
+            }
+
+        """
+
         iscsi_properties = self._get_iscsi_properties(volume)
+        return {
+            'driver_volume_type': 'iscsi',
+            'data': iscsi_properties
+        }
 
-        if not iscsi_properties['target_discovered']:
-            self._run_iscsiadm(iscsi_properties, ('--op', 'new'))
-
-        if iscsi_properties.get('auth_method'):
-            self._iscsiadm_update(iscsi_properties,
-                                  "node.session.auth.authmethod",
-                                  iscsi_properties['auth_method'])
-            self._iscsiadm_update(iscsi_properties,
-                                  "node.session.auth.username",
-                                  iscsi_properties['auth_username'])
-            self._iscsiadm_update(iscsi_properties,
-                                  "node.session.auth.password",
-                                  iscsi_properties['auth_password'])
-
-        self._run_iscsiadm(iscsi_properties, ("--login", ))
-
-        self._iscsiadm_update(iscsi_properties, "node.startup", "automatic")
-
-        mount_device = ("/dev/disk/by-path/ip-%s-iscsi-%s-lun-0" %
-                        (iscsi_properties['target_portal'],
-                         iscsi_properties['target_iqn']))
-
-        # The /dev/disk/by-path/... node is not always present immediately
-        # TODO(justinsb): This retry-with-delay is a pattern, move to utils?
-        tries = 0
-        while not os.path.exists(mount_device):
-            if tries >= FLAGS.num_iscsi_scan_tries:
-                raise exception.Error(_("iSCSI device not found at %s") %
-                                      (mount_device))
-
-            LOG.warn(_("ISCSI volume not yet found at: %(mount_device)s. "
-                       "Will rescan & retry.  Try number: %(tries)s") %
-                     locals())
-
-            # The rescan isn't documented as being necessary(?), but it helps
-            self._run_iscsiadm(iscsi_properties, ("--rescan", ))
-
-            tries = tries + 1
-            if not os.path.exists(mount_device):
-                time.sleep(tries ** 2)
-
-        if tries != 0:
-            LOG.debug(_("Found iSCSI node %(mount_device)s "
-                        "(after %(tries)s rescans)") %
-                      locals())
-
-        return mount_device
-
-    def undiscover_volume(self, volume):
-        """Undiscover volume on a remote host."""
-        iscsi_properties = self._get_iscsi_properties(volume)
-        self._iscsiadm_update(iscsi_properties, "node.startup", "manual")
-        self._run_iscsiadm(iscsi_properties, ("--logout", ))
-        self._run_iscsiadm(iscsi_properties, ('--op', 'delete'))
+    def terminate_connection(self, volume, address):
+        pass
 
     def check_for_export(self, context, volume_id):
         """Make sure volume is exported."""
 
         tid = self.db.volume_get_iscsi_target_num(context, volume_id)
         try:
-            self._execute('ietadm', '--op', 'show',
-                          '--tid=%(tid)d' % locals(), run_as_root=True)
+            self.tgtadm.show_target(tid)
         except exception.ProcessExecutionError, e:
             # Instances remount read-only in this case.
             # /etc/init.d/iscsitarget restart and rebooting nova-volume
@@ -598,19 +442,19 @@ class FakeISCSIDriver(ISCSIDriver):
     """Logs calls instead of executing."""
     def __init__(self, *args, **kwargs):
         super(FakeISCSIDriver, self).__init__(execute=self.fake_execute,
-                                              sync_exec=self.fake_execute,
                                               *args, **kwargs)
 
     def check_for_setup_error(self):
         """No setup necessary in fake mode."""
         pass
 
-    def discover_volume(self, context, volume):
-        """Discover volume on a remote host."""
-        return "/dev/disk/by-path/volume-id-%d" % volume['id']
+    def initialize_connection(self, volume, address):
+        return {
+            'driver_volume_type': 'iscsi',
+            'data': {}
+        }
 
-    def undiscover_volume(self, volume):
-        """Undiscover volume on a remote host."""
+    def terminate_connection(self, volume, address):
         pass
 
     @staticmethod
@@ -675,12 +519,15 @@ class RBDDriver(VolumeDriver):
         """Removes an export for a logical volume"""
         pass
 
-    def discover_volume(self, context, volume):
-        """Discover volume on a remote host"""
-        return "rbd:%s/%s" % (FLAGS.rbd_pool, volume['name'])
+    def initialize_connection(self, volume, address):
+        return {
+            'driver_volume_type': 'rbd',
+            'data': {
+                'name': '%s/%s' % (FLAGS.rbd_pool, volume['name'])
+            }
+        }
 
-    def undiscover_volume(self, volume):
-        """Undiscover volume on a remote host"""
+    def terminate_connection(self, volume, address):
         pass
 
 
@@ -690,8 +537,11 @@ class SheepdogDriver(VolumeDriver):
     def check_for_setup_error(self):
         """Returns an error if prerequisites aren't met"""
         try:
+            #NOTE(francois-charlier) Since 0.24 'collie cluster info -r'
+            #  gives short output, but for compatibility reason we won't
+            #  use it and just check if 'running' is in the output.
             (out, err) = self._execute('collie', 'cluster', 'info')
-            if not out.startswith('running'):
+            if not 'running' in out.split():
                 raise exception.Error(_("Sheepdog is not working: %s") % out)
         except exception.ProcessExecutionError:
             raise exception.Error(_("Sheepdog is not working"))
@@ -738,12 +588,15 @@ class SheepdogDriver(VolumeDriver):
         """Removes an export for a logical volume"""
         pass
 
-    def discover_volume(self, context, volume):
-        """Discover volume on a remote host"""
-        return "sheepdog:%s" % volume['name']
+    def initialize_connection(self, volume, address):
+        return {
+            'driver_volume_type': 'sheepdog',
+            'data': {
+                'name': volume['name']
+            }
+        }
 
-    def undiscover_volume(self, volume):
-        """Undiscover volume on a remote host"""
+    def terminate_connection(self, volume, address):
         pass
 
 
@@ -772,11 +625,11 @@ class LoggingVolumeDriver(VolumeDriver):
     def remove_export(self, context, volume):
         self.log_action('remove_export', volume)
 
-    def discover_volume(self, context, volume):
-        self.log_action('discover_volume', volume)
+    def initialize_connection(self, volume, address):
+        self.log_action('initialize_connection', volume)
 
-    def undiscover_volume(self, volume):
-        self.log_action('undiscover_volume', volume)
+    def terminate_connection(self, volume, address):
+        self.log_action('terminate_connection', volume)
 
     def check_for_export(self, context, volume_id):
         self.log_action('check_for_export', volume_id)
@@ -870,14 +723,14 @@ class ZadaraBEDriver(ISCSIDriver):
                 break
 
         try:
-            self._sync_exec('/var/lib/zadara/bin/zadara_sncfg',
-                            'create_qospart',
-                            '--qos', qosstr,
-                            '--pname', volume['name'],
-                            '--psize', sizestr,
-                            '--vsaid', vsa_id,
-                            run_as_root=True,
-                            check_exit_code=0)
+            self._execute('/var/lib/zadara/bin/zadara_sncfg',
+                          'create_qospart',
+                          '--qos', qosstr,
+                          '--pname', volume['name'],
+                          '--psize', sizestr,
+                          '--vsaid', vsa_id,
+                          run_as_root=True,
+                          check_exit_code=0)
         except exception.ProcessExecutionError:
             LOG.debug(_("VSA BE create_volume for %s failed"), volume['name'])
             raise
@@ -895,16 +748,73 @@ class ZadaraBEDriver(ISCSIDriver):
             return
 
         try:
-            self._sync_exec('/var/lib/zadara/bin/zadara_sncfg',
-                            'delete_partition',
-                            '--pname', volume['name'],
-                            run_as_root=True,
-                            check_exit_code=0)
+            self._execute('/var/lib/zadara/bin/zadara_sncfg',
+                          'delete_partition',
+                          '--pname', volume['name'],
+                          run_as_root=True,
+                          check_exit_code=0)
         except exception.ProcessExecutionError:
             LOG.debug(_("VSA BE delete_volume for %s failed"), volume['name'])
             return
 
         LOG.debug(_("VSA BE delete_volume for %s suceeded"), volume['name'])
+
+    def _discover_volume(self, context, volume):
+        """Discover volume on a remote host."""
+        iscsi_properties = self._get_iscsi_properties(volume)
+
+        if not iscsi_properties['target_discovered']:
+            self._run_iscsiadm(iscsi_properties, ('--op', 'new'))
+
+        if iscsi_properties.get('auth_method'):
+            self._iscsiadm_update(iscsi_properties,
+                                  "node.session.auth.authmethod",
+                                  iscsi_properties['auth_method'])
+            self._iscsiadm_update(iscsi_properties,
+                                  "node.session.auth.username",
+                                  iscsi_properties['auth_username'])
+            self._iscsiadm_update(iscsi_properties,
+                                  "node.session.auth.password",
+                                  iscsi_properties['auth_password'])
+
+        self._run_iscsiadm(iscsi_properties, ("--login", ))
+
+        self._iscsiadm_update(iscsi_properties, "node.startup", "automatic")
+
+        if FLAGS.iscsi_helper == 'tgtadm':
+            mount_device = ("/dev/disk/by-path/ip-%s-iscsi-%s-lun-1" %
+                            (iscsi_properties['target_portal'],
+                             iscsi_properties['target_iqn']))
+        else:
+            mount_device = ("/dev/disk/by-path/ip-%s-iscsi-%s-lun-0" %
+                            (iscsi_properties['target_portal'],
+                             iscsi_properties['target_iqn']))
+
+        # The /dev/disk/by-path/... node is not always present immediately
+        # TODO(justinsb): This retry-with-delay is a pattern, move to utils?
+        tries = 0
+        while not os.path.exists(mount_device):
+            if tries >= FLAGS.num_iscsi_scan_tries:
+                raise exception.Error(_("iSCSI device not found at %s") %
+                                      (mount_device))
+
+            LOG.warn(_("ISCSI volume not yet found at: %(mount_device)s. "
+                       "Will rescan & retry.  Try number: %(tries)s") %
+                     locals())
+
+            # The rescan isn't documented as being necessary(?), but it helps
+            self._run_iscsiadm(iscsi_properties, ("--rescan", ))
+
+            tries = tries + 1
+            if not os.path.exists(mount_device):
+                time.sleep(tries ** 2)
+
+        if tries != 0:
+            LOG.debug(_("Found iSCSI node %(mount_device)s "
+                        "(after %(tries)s rescans)") %
+                      locals())
+
+        return mount_device
 
     def local_path(self, volume):
         if self._not_vsa_volume_or_drive(volume):
@@ -913,7 +823,10 @@ class ZadaraBEDriver(ISCSIDriver):
         if self._is_vsa_volume(volume):
             LOG.debug(_("\tFE VSA Volume %s local path call - call discover"),
                         volume['name'])
-            return super(ZadaraBEDriver, self).discover_volume(None, volume)
+            # NOTE(vish): Copied discover from iscsi_driver since it is used
+            #             but this should probably be refactored into a common
+            #             area because it is used in libvirt driver.
+            return self._discover_volume(None, volume)
 
         raise exception.Error(_("local_path not supported"))
 
@@ -957,7 +870,7 @@ class ZadaraBEDriver(ISCSIDriver):
                                                           volume['host'])
         try:
             ret = self._common_be_export(context, volume, iscsi_target)
-        except:
+        except Exception:
             raise exception.ProcessExecutionError
         return ret
 
@@ -980,12 +893,12 @@ class ZadaraBEDriver(ISCSIDriver):
             return
 
         try:
-            self._sync_exec('/var/lib/zadara/bin/zadara_sncfg',
-                        'remove_export',
-                        '--pname', volume['name'],
-                        '--tid', iscsi_target,
-                        run_as_root=True,
-                        check_exit_code=0)
+            self._execute('/var/lib/zadara/bin/zadara_sncfg',
+                          'remove_export',
+                          '--pname', volume['name'],
+                          '--tid', iscsi_target,
+                          run_as_root=True,
+                          check_exit_code=0)
         except exception.ProcessExecutionError:
             LOG.debug(_("VSA BE remove_export for %s failed"), volume['name'])
             return
@@ -1010,13 +923,12 @@ class ZadaraBEDriver(ISCSIDriver):
         Common logic that asks zadara_sncfg to setup iSCSI target/lun for
         this volume
         """
-        (out, err) = self._sync_exec(
-                                '/var/lib/zadara/bin/zadara_sncfg',
-                                'create_export',
-                                '--pname', volume['name'],
-                                '--tid', iscsi_target,
-                                run_as_root=True,
-                                check_exit_code=0)
+        (out, err) = self._execute('/var/lib/zadara/bin/zadara_sncfg',
+                                   'create_export',
+                                   '--pname', volume['name'],
+                                   '--tid', iscsi_target,
+                                   run_as_root=True,
+                                   check_exit_code=0)
 
         result_xml = ElementTree.fromstring(out)
         response_node = result_xml.find("Sn")
@@ -1026,22 +938,19 @@ class ZadaraBEDriver(ISCSIDriver):
 
         sn_ip = response_node.findtext("SnIp")
         sn_iqn = response_node.findtext("IqnName")
-        iscsi_portal = sn_ip + ":3260," + ("%s" % iscsi_target)
 
         model_update = {}
-        model_update['provider_location'] = ("%s %s" %
-                                             (iscsi_portal,
-                                              sn_iqn))
+        model_update['provider_location'] = _iscsi_location(
+            sn_ip, iscsi_target, sn_iqn)
         return model_update
 
     def _get_qosgroup_summary(self):
         """gets the list of qosgroups from Zadara BE"""
         try:
-            (out, err) = self._sync_exec(
-                                        '/var/lib/zadara/bin/zadara_sncfg',
-                                        'get_qosgroups_xml',
-                                        run_as_root=True,
-                                        check_exit_code=0)
+            (out, err) = self._execute('/var/lib/zadara/bin/zadara_sncfg',
+                                       'get_qosgroups_xml',
+                                       run_as_root=True,
+                                       check_exit_code=0)
         except exception.ProcessExecutionError:
             LOG.debug(_("Failed to retrieve QoS info"))
             return {}
@@ -1081,3 +990,7 @@ class ZadaraBEDriver(ISCSIDriver):
 
         drive_info = self._get_qosgroup_summary()
         return {'drive_qos_info': drive_info}
+
+
+def _iscsi_location(ip, target, iqn):
+    return "%s:%s,%s %s" % (ip, FLAGS.iscsi_port, target, iqn)

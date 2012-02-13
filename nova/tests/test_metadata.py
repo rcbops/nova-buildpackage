@@ -19,26 +19,25 @@
 """Tests for the testing the metadata code."""
 
 import base64
-import httplib
-
 import webob
 
+from nova.api.metadata import handler
+from nova.db.sqlalchemy import api
+from nova import db
 from nova import exception
 from nova import flags
+from nova import network
 from nova import test
-from nova import wsgi
-from nova.api.ec2 import metadatarequesthandler
-from nova.db.sqlalchemy import api
+from nova.tests import fake_network
 
 
 FLAGS = flags.FLAGS
-flags.DECLARE('dhcp_domain', 'nova.network.manager')
 
 USER_DATA_STRING = ("This is an encoded string")
 ENCODE_USER_DATA_STRING = base64.b64encode(USER_DATA_STRING)
 
 
-def return_non_existing_server_by_address(context, address):
+def return_non_existing_server_by_address(context, address, *args, **kwarg):
     raise exception.NotFound()
 
 
@@ -48,6 +47,7 @@ class MetadataTestCase(test.TestCase):
     def setUp(self):
         super(MetadataTestCase, self).setUp()
         self.instance = ({'id': 1,
+                         'name': 'fake',
                          'project_id': 'test',
                          'key_name': None,
                          'host': 'test',
@@ -56,9 +56,19 @@ class MetadataTestCase(test.TestCase):
                          'reservation_id': 'r-xxxxxxxx',
                          'user_data': '',
                          'image_ref': 7,
+                         'vcpus': 1,
                          'fixed_ips': [],
                          'root_device_name': '/dev/sda1',
                          'hostname': 'test'})
+
+        def fake_get_instance_nw_info(self, context, instance):
+            return [(None, {'label': 'public',
+                            'ips': [{'ip': '192.168.0.3'},
+                                    {'ip': '192.168.0.4'}],
+                            'ip6s': [{'ip': 'fe80::beef'}]})]
+
+        def fake_get_floating_ips_by_fixed_address(self, context, fixed_ip):
+            return ['1.2.3.4', '5.6.7.8']
 
         def instance_get(*args, **kwargs):
             return self.instance
@@ -66,13 +76,17 @@ class MetadataTestCase(test.TestCase):
         def instance_get_list(*args, **kwargs):
             return [self.instance]
 
-        def floating_get(*args, **kwargs):
-            return '99.99.99.99'
-
+        self.stubs.Set(network.API, 'get_instance_nw_info',
+                fake_get_instance_nw_info)
+        self.stubs.Set(network.API, 'get_floating_ips_by_fixed_address',
+                fake_get_floating_ips_by_fixed_address)
         self.stubs.Set(api, 'instance_get', instance_get)
         self.stubs.Set(api, 'instance_get_all_by_filters', instance_get_list)
-        self.stubs.Set(api, 'instance_get_floating_address', floating_get)
-        self.app = metadatarequesthandler.MetadataRequestHandler()
+        self.app = handler.MetadataRequestHandler()
+        network_manager = fake_network.FakeNetworkManager()
+        self.stubs.Set(self.app.compute_api.network_api,
+                       'get_instance_uuids_by_ip_filter',
+                       network_manager.get_instance_uuids_by_ip_filter)
 
     def request(self, relative_url):
         request = webob.Request.blank(relative_url)
@@ -127,3 +141,47 @@ class MetadataTestCase(test.TestCase):
     def test_local_hostname_fqdn(self):
         self.assertEqual(self.request('/meta-data/local-hostname'),
             "%s.%s" % (self.instance['hostname'], FLAGS.dhcp_domain))
+
+    def test_get_instance_mapping(self):
+        """Make sure that _get_instance_mapping works"""
+        ctxt = None
+        instance_ref0 = {'id': 0,
+                         'root_device_name': None}
+        instance_ref1 = {'id': 0,
+                         'root_device_name': '/dev/sda1'}
+
+        def fake_bdm_get(ctxt, id):
+            return [{'volume_id': 87654321,
+                     'snapshot_id': None,
+                     'no_device': None,
+                     'virtual_name': None,
+                     'delete_on_termination': True,
+                     'device_name': '/dev/sdh'},
+                    {'volume_id': None,
+                     'snapshot_id': None,
+                     'no_device': None,
+                     'virtual_name': 'swap',
+                     'delete_on_termination': None,
+                     'device_name': '/dev/sdc'},
+                    {'volume_id': None,
+                     'snapshot_id': None,
+                     'no_device': None,
+                     'virtual_name': 'ephemeral0',
+                     'delete_on_termination': None,
+                     'device_name': '/dev/sdb'}]
+
+        self.stubs.Set(db, 'block_device_mapping_get_all_by_instance',
+                       fake_bdm_get)
+
+        expected = {'ami': 'sda1',
+                    'root': '/dev/sda1',
+                    'ephemeral0': '/dev/sdb',
+                    'swap': '/dev/sdc',
+                    'ebs0': '/dev/sdh'}
+
+        self.assertEqual(self.app._format_instance_mapping(ctxt,
+                                                           instance_ref0),
+                         handler._DEFAULT_MAPPINGS)
+        self.assertEqual(self.app._format_instance_mapping(ctxt,
+                                                           instance_ref1),
+                         expected)

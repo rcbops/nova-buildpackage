@@ -20,7 +20,6 @@
 """
 Scheduler that allows routing some calls to one driver and others to another.
 """
-
 from nova import flags
 from nova import utils
 from nova.scheduler import driver
@@ -37,8 +36,10 @@ flags.DEFINE_string('volume_scheduler_driver',
 
 # A mapping of methods to topics so we can figure out which driver to use.
 _METHOD_MAP = {'run_instance': 'compute',
-               'start_instance': 'compute',
-               'create_volume': 'volume'}
+               'prep_resize': 'compute',
+               'live_migration': 'compute',
+               'create_volume': 'volume',
+               'create_volumes': 'volume'}
 
 
 class MultiScheduler(driver.Scheduler):
@@ -69,5 +70,6 @@ class MultiScheduler(driver.Scheduler):
         for k, v in self.drivers.iteritems():
             v.set_zone_manager(zone_manager)
 
-    def schedule(self, context, topic, *_args, **_kwargs):
-        return self.drivers[topic].schedule(context, topic, *_args, **_kwargs)
+    def schedule(self, context, topic, method, *_args, **_kwargs):
+        return self.drivers[topic].schedule(context, topic,
+                method, *_args, **_kwargs)

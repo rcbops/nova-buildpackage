@@ -3,6 +3,7 @@
 # Copyright 2010 United States Government as represented by the
 # Administrator of the National Aeronautics and Space Administration.
 # All Rights Reserved.
+# Copyright 2011 Red Hat, Inc.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -16,7 +17,10 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from nova import exception
+import exceptions
+import os
+import tempfile
+
 from nova import flags
 from nova import test
 
@@ -64,6 +68,45 @@ class FlagsTestCase(test.TestCase):
         self.assertEqual(self.FLAGS.false, True)
         self.assertEqual(self.FLAGS.true, False)
 
+    def test_define_float(self):
+        flags.DEFINE_float('float', 6.66, 'desc', flag_values=self.FLAGS)
+        self.assertEqual(self.FLAGS.float, 6.66)
+
+    def test_define_multistring(self):
+        flags.DEFINE_multistring('multi', ['blaa'], 'desc',
+                                 flag_values=self.FLAGS)
+
+        self.assert_(self.FLAGS['multi'])
+        self.assertEqual(self.FLAGS.multi, ['blaa'])
+
+        argv = ['flags_test', '--multi', 'foo', '--multi', 'bar']
+        self.FLAGS(argv)
+
+        self.assertEqual(self.FLAGS.multi, ['foo', 'bar'])
+
+        # Re-parse to test multistring isn't append multiple times
+        self.FLAGS(argv + ['--unknown1', '--unknown2'])
+        self.assertEqual(self.FLAGS.multi, ['foo', 'bar'])
+
+    def test_define_list(self):
+        flags.DEFINE_list('list', ['foo'], 'desc', flag_values=self.FLAGS)
+
+        self.assert_(self.FLAGS['list'])
+        self.assertEqual(self.FLAGS.list, ['foo'])
+
+        argv = ['flags_test', '--list=a,b,c,d']
+        self.FLAGS(argv)
+
+        self.assertEqual(self.FLAGS.list, ['a', 'b', 'c', 'd'])
+
+    def test_error(self):
+        flags.DEFINE_integer('error', 1, 'desc', flag_values=self.FLAGS)
+
+        self.assertEqual(self.FLAGS.error, 1)
+
+        argv = ['flags_test', '--error=foo']
+        self.assertRaises(exceptions.SystemExit, self.FLAGS, argv)
+
     def test_declare(self):
         self.assert_('answer' not in self.global_FLAGS)
         flags.DECLARE('answer', 'nova.tests.declare_flags')
@@ -75,6 +118,14 @@ class FlagsTestCase(test.TestCase):
         self.assertEqual(self.global_FLAGS.answer, 256)
         flags.DECLARE('answer', 'nova.tests.declare_flags')
         self.assertEqual(self.global_FLAGS.answer, 256)
+
+    def test_getopt_non_interspersed_args(self):
+        self.assert_('runtime_answer' not in self.global_FLAGS)
+
+        argv = ['flags_test', 'extra_arg', '--runtime_answer=60']
+        args = self.global_FLAGS(argv)
+        self.assertEqual(len(args), 3)
+        self.assertEqual(argv, args)
 
     def test_runtime_and_unknown_flags(self):
         self.assert_('runtime_answer' not in self.global_FLAGS)
@@ -114,3 +165,57 @@ class FlagsTestCase(test.TestCase):
         self.assertEqual(FLAGS.flags_unittest, 'foo')
         FLAGS.flags_unittest = 'bar'
         self.assertEqual(FLAGS.flags_unittest, 'bar')
+
+    def test_flag_overrides(self):
+        self.assertEqual(FLAGS.flags_unittest, 'foo')
+        self.flags(flags_unittest='bar')
+        self.assertEqual(FLAGS.flags_unittest, 'bar')
+        self.assertEqual(FLAGS['flags_unittest'].value, 'bar')
+        self.assertEqual(FLAGS.FlagValuesDict()['flags_unittest'], 'bar')
+        self.reset_flags()
+        self.assertEqual(FLAGS.flags_unittest, 'foo')
+        self.assertEqual(FLAGS['flags_unittest'].value, 'foo')
+        self.assertEqual(FLAGS.FlagValuesDict()['flags_unittest'], 'foo')
+
+    def test_flagfile(self):
+        flags.DEFINE_string('string', 'default', 'desc',
+                            flag_values=self.FLAGS)
+        flags.DEFINE_integer('int', 1, 'desc', flag_values=self.FLAGS)
+        flags.DEFINE_bool('false', False, 'desc', flag_values=self.FLAGS)
+        flags.DEFINE_bool('true', True, 'desc', flag_values=self.FLAGS)
+        flags.DEFINE_multistring('multi', ['blaa'], 'desc',
+                                 flag_values=self.FLAGS)
+
+        (fd, path) = tempfile.mkstemp(prefix='nova', suffix='.flags')
+
+        try:
+            os.write(fd, '--string=foo\n--int=2\n--false\n--notrue\n')
+            os.write(fd, '--multi=foo\n--multi=bar\n')
+            os.close(fd)
+
+            self.FLAGS(['flags_test', '--flagfile=' + path])
+
+            self.assertEqual(self.FLAGS.string, 'foo')
+            self.assertEqual(self.FLAGS.int, 2)
+            self.assertEqual(self.FLAGS.false, True)
+            self.assertEqual(self.FLAGS.true, False)
+            self.assertEqual(self.FLAGS.multi, ['foo', 'bar'])
+
+            # Re-parse to test multistring isn't append multiple times
+            self.FLAGS(['flags_test', '--flagfile=' + path])
+            self.assertEqual(self.FLAGS.multi, ['foo', 'bar'])
+        finally:
+            os.remove(path)
+
+    def test_defaults(self):
+        flags.DEFINE_string('foo', 'bar', 'help', flag_values=self.FLAGS)
+        self.assertEqual(self.FLAGS.foo, 'bar')
+
+        self.FLAGS['foo'].SetDefault('blaa')
+        self.assertEqual(self.FLAGS.foo, 'blaa')
+
+    def test_templated_values(self):
+        flags.DEFINE_string('foo', 'foo', 'help', flag_values=self.FLAGS)
+        flags.DEFINE_string('bar', 'bar', 'help', flag_values=self.FLAGS)
+        flags.DEFINE_string('blaa', '$foo$bar', 'help', flag_values=self.FLAGS)
+        self.assertEqual(self.FLAGS.blaa, 'foobar')

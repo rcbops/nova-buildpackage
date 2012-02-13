@@ -19,13 +19,14 @@
 
 """Utilities and helper functions."""
 
+import contextlib
 import datetime
 import functools
 import inspect
 import json
 import lockfile
-import netaddr
 import os
+import pyclbr
 import random
 import re
 import shlex
@@ -35,18 +36,18 @@ import sys
 import time
 import types
 import uuid
-import pyclbr
+import warnings
 from xml.sax import saxutils
 
 from eventlet import event
 from eventlet import greenthread
 from eventlet import semaphore
 from eventlet.green import subprocess
+import netaddr
 
 from nova import exception
 from nova import flags
 from nova import log as logging
-from nova import version
 
 
 LOG = logging.getLogger("nova.utils")
@@ -74,6 +75,29 @@ def import_object(import_str):
     except ImportError:
         cls = import_class(import_str)
         return cls()
+
+
+def find_config(config_path):
+    """Find a configuration file using the given hint.
+
+    :param config_path: Full or relative path to the config.
+    :returns: Full path of the config, if it exists.
+    :raises: `nova.exception.ConfigNotFound`
+
+    """
+    possible_locations = [
+        config_path,
+        os.path.join(FLAGS.state_path, "etc", "nova", config_path),
+        os.path.join(FLAGS.state_path, "etc", config_path),
+        os.path.join(FLAGS.state_path, config_path),
+        "/etc/nova/%s" % config_path,
+    ]
+
+    for path in possible_locations:
+        if os.path.exists(path):
+            return os.path.abspath(path)
+
+    raise exception.ConfigNotFound(path=os.path.abspath(config_path))
 
 
 def vpn_ping(address, port, timeout=0.05, session_id=None):
@@ -133,8 +157,9 @@ def execute(*cmd, **kwargs):
 
     :cmd                Passed to subprocess.Popen.
     :process_input      Send to opened process.
-    :check_exit_code    Defaults to 0. Raise exception.ProcessExecutionError
-                        unless program exits with this code.
+    :check_exit_code    Single bool, int, or list of allowed exit codes.
+                        Defaults to [0].  Raise exception.ProcessExecutionError
+                        unless program exits with one of these code.
     :delay_on_retry     True | False. Defaults to True. If set to True, wait a
                         short amount of time before retrying.
     :attempts           How many times to retry cmd.
@@ -144,13 +169,24 @@ def execute(*cmd, **kwargs):
 
     :raises exception.Error on receiving unknown arguments
     :raises exception.ProcessExecutionError
+
+    :returns a tuple, (stdout, stderr) from the spawned process, or None if
+             the command fails.
     """
 
     process_input = kwargs.pop('process_input', None)
-    check_exit_code = kwargs.pop('check_exit_code', 0)
+    check_exit_code = kwargs.pop('check_exit_code', [0])
+    ignore_exit_code = False
+    if isinstance(check_exit_code, bool):
+        ignore_exit_code = not check_exit_code
+        check_exit_code = [0]
+    elif isinstance(check_exit_code, int):
+        check_exit_code = [check_exit_code]
     delay_on_retry = kwargs.pop('delay_on_retry', True)
     attempts = kwargs.pop('attempts', 1)
     run_as_root = kwargs.pop('run_as_root', False)
+    shell = kwargs.pop('shell', False)
+
     if len(kwargs):
         raise exception.Error(_('Got unknown keyword args '
                                 'to utils.execute: %r') % kwargs)
@@ -168,7 +204,8 @@ def execute(*cmd, **kwargs):
                                    stdin=_PIPE,
                                    stdout=_PIPE,
                                    stderr=_PIPE,
-                                   close_fds=True)
+                                   close_fds=True,
+                                   shell=shell)
             result = None
             if process_input is not None:
                 result = obj.communicate(process_input)
@@ -178,8 +215,8 @@ def execute(*cmd, **kwargs):
             _returncode = obj.returncode  # pylint: disable=E1101
             if _returncode:
                 LOG.debug(_('Result was %s') % _returncode)
-                if type(check_exit_code) == types.IntType \
-                        and _returncode != check_exit_code:
+                if not ignore_exit_code \
+                    and _returncode not in check_exit_code:
                     (stdout, stderr) = result
                     raise exception.ProcessExecutionError(
                             exit_code=_returncode,
@@ -199,6 +236,36 @@ def execute(*cmd, **kwargs):
             #               call clean something up in between calls, without
             #               it two execute calls in a row hangs the second one
             greenthread.sleep(0)
+
+
+def trycmd(*args, **kwargs):
+    """
+    A wrapper around execute() to more easily handle warnings and errors.
+
+    Returns an (out, err) tuple of strings containing the output of
+    the command's stdout and stderr.  If 'err' is not empty then the
+    command can be considered to have failed.
+
+    :discard_warnings   True | False. Defaults to False. If set to True,
+                        then for succeeding commands, stderr is cleared
+
+    """
+    discard_warnings = kwargs.pop('discard_warnings', False)
+
+    try:
+        out, err = execute(*args, **kwargs)
+        failed = False
+    except exception.ProcessExecutionError, exn:
+        out, err = '', str(exn)
+        LOG.debug(err)
+        failed = True
+
+    if not failed and discard_warnings and err:
+        # Handle commands that output to stderr but otherwise succeed
+        LOG.debug(err)
+        err = ''
+
+    return out, err
 
 
 def ssh_execute(ssh, cmd, process_input=None,
@@ -284,47 +351,124 @@ def generate_uid(topic, size=8):
 
 # Default symbols to use for passwords. Avoids visually confusing characters.
 # ~6 bits per symbol
-DEFAULT_PASSWORD_SYMBOLS = ('23456789'  # Removed: 0,1
-                            'ABCDEFGHJKLMNPQRSTUVWXYZ'  # Removed: I, O
+DEFAULT_PASSWORD_SYMBOLS = ('23456789',  # Removed: 0,1
+                            'ABCDEFGHJKLMNPQRSTUVWXYZ',   # Removed: I, O
                             'abcdefghijkmnopqrstuvwxyz')  # Removed: l
 
 
 # ~5 bits per symbol
-EASIER_PASSWORD_SYMBOLS = ('23456789'  # Removed: 0, 1
+EASIER_PASSWORD_SYMBOLS = ('23456789',  # Removed: 0, 1
                            'ABCDEFGHJKLMNPQRSTUVWXYZ')  # Removed: I, O
 
 
-def usage_from_instance(instance_ref, **kw):
+def current_audit_period(unit=None):
+    if not unit:
+        unit = FLAGS.instance_usage_audit_period
+    rightnow = utcnow()
+    if unit not in ('month', 'day', 'year', 'hour'):
+        raise ValueError('Time period must be hour, day, month or year')
+    n = 1  # we are currently only using multiples of 1 unit (mdragon)
+    if unit == 'month':
+        year = rightnow.year - (n // 12)
+        n = n % 12
+        if n >= rightnow.month:
+            year -= 1
+            month = 12 + (rightnow.month - n)
+        else:
+            month = rightnow.month - n
+        begin = datetime.datetime(day=1, month=month, year=year)
+        end = datetime.datetime(day=1,
+                                month=rightnow.month,
+                                year=rightnow.year)
+
+    elif unit == 'year':
+        begin = datetime.datetime(day=1, month=1, year=rightnow.year - n)
+        end = datetime.datetime(day=1, month=1, year=rightnow.year)
+
+    elif unit == 'day':
+        b = rightnow - datetime.timedelta(days=n)
+        begin = datetime.datetime(day=b.day, month=b.month, year=b.year)
+        end = datetime.datetime(day=rightnow.day,
+                               month=rightnow.month,
+                               year=rightnow.year)
+    elif unit == 'hour':
+        end = rightnow.replace(minute=0, second=0, microsecond=0)
+        begin = end - datetime.timedelta(hours=n)
+
+    return (begin, end)
+
+
+def usage_from_instance(instance_ref, network_info=None, **kw):
+    image_ref_url = "%s/images/%s" % (generate_glance_url(),
+            instance_ref['image_ref'])
+
     usage_info = dict(
-          project_id=instance_ref['project_id'],
+          tenant_id=instance_ref['project_id'],
           user_id=instance_ref['user_id'],
-          instance_id=instance_ref['id'],
+          instance_id=instance_ref['uuid'],
           instance_type=instance_ref['instance_type']['name'],
           instance_type_id=instance_ref['instance_type_id'],
+          memory_mb=instance_ref['memory_mb'],
+          disk_gb=instance_ref['root_gb'] + instance_ref['ephemeral_gb'],
           display_name=instance_ref['display_name'],
           created_at=str(instance_ref['created_at']),
           launched_at=str(instance_ref['launched_at']) \
                       if instance_ref['launched_at'] else '',
-          image_ref=instance_ref['image_ref'])
+          image_ref_url=image_ref_url,
+          state=instance_ref['vm_state'],
+          state_description=instance_ref['task_state'] \
+                             if instance_ref['task_state'] else '')
+
+    # NOTE(jkoelker) This nastyness can go away once compute uses the
+    #                network model
+    if network_info is not None:
+        fixed_ips = []
+        for network, info in network_info:
+            fixed_ips.extend([ip['ip'] for ip in info['ips']])
+        usage_info['fixed_ips'] = fixed_ips
+
     usage_info.update(kw)
     return usage_info
 
 
-def generate_password(length=20, symbols=DEFAULT_PASSWORD_SYMBOLS):
-    """Generate a random password from the supplied symbols.
+def generate_password(length=20, symbolgroups=DEFAULT_PASSWORD_SYMBOLS):
+    """Generate a random password from the supplied symbol groups.
+
+    At least one symbol from each group will be included. Unpredictable
+    results if length is less than the number of symbol groups.
 
     Believed to be reasonably secure (with a reasonable password length!)
 
     """
     r = random.SystemRandom()
-    return ''.join([r.choice(symbols) for _i in xrange(length)])
+
+    # NOTE(jerdfelt): Some password policies require at least one character
+    # from each group of symbols, so start off with one random character
+    # from each symbol group
+    password = [r.choice(s) for s in symbolgroups]
+    # If length < len(symbolgroups), the leading characters will only
+    # be from the first length groups. Try our best to not be predictable
+    # by shuffling and then truncating.
+    r.shuffle(password)
+    password = password[:length]
+    length -= len(password)
+
+    # then fill with random characters from all symbol groups
+    symbols = ''.join(symbolgroups)
+    password.extend([r.choice(symbols) for _i in xrange(length)])
+
+    # finally shuffle to ensure first x characters aren't from a
+    # predictable group
+    r.shuffle(password)
+
+    return ''.join(password)
 
 
 def last_octet(address):
     return int(address.split('.')[-1])
 
 
-def  get_my_linklocal(interface):
+def get_my_linklocal(interface):
     try:
         if_str = execute('ip', '-f', 'inet6', '-o', 'addr', 'show', interface)
         condition = '\s+inet6\s+([0-9a-f:]+)/\d+\s+scope\s+link'
@@ -411,7 +555,7 @@ def parse_mailmap(mailmap='.mailmap'):
             l = l.strip()
             if not l.startswith('#') and ' ' in l:
                 canonical_email, alias = l.split(' ')
-                mapping[alias] = canonical_email
+                mapping[alias.lower()] = canonical_email.lower()
     return mapping
 
 
@@ -436,7 +580,7 @@ class LazyPluggable(object):
                 raise exception.Error(_('Invalid backend: %s') % backend_name)
 
             backend = self.__backends[backend_name]
-            if type(backend) == type(tuple()):
+            if isinstance(backend, tuple):
                 name = backend[0]
                 fromlist = backend[1]
             else:
@@ -557,19 +701,27 @@ def to_primitive(value, convert_instances=False, level=0):
         if test(value):
             return unicode(value)
 
+    # FIXME(vish): Workaround for LP bug 852095. Without this workaround,
+    #              tests that raise an exception in a mocked method that
+    #              has a @wrap_exception with a notifier will fail. If
+    #              we up the dependency to 0.5.4 (when it is released) we
+    #              can remove this workaround.
+    if getattr(value, '__module__', None) == 'mox':
+        return 'mock'
+
     if level > 3:
         return '?'
 
     # The try block may not be necessary after the class check above,
     # but just in case ...
     try:
-        if type(value) is type([]) or type(value) is type((None,)):
+        if isinstance(value, (list, tuple)):
             o = []
             for v in value:
                 o.append(to_primitive(v, convert_instances=convert_instances,
                                       level=level))
             return o
-        elif type(value) is type({}):
+        elif isinstance(value, dict):
             o = {}
             for k, v in value.iteritems():
                 o[k] = to_primitive(v, convert_instances=convert_instances,
@@ -671,6 +823,9 @@ def synchronized(name, external=False):
                         '"%(method)s"...' % {'lock': name,
                                              'method': f.__name__}))
             with sem:
+                LOG.debug(_('Got semaphore "%(lock)s" for method '
+                            '"%(method)s"...' % {'lock': name,
+                                                 'method': f.__name__}))
                 if external:
                     LOG.debug(_('Attempting to grab file lock "%(lock)s" for '
                                 'method "%(method)s"...' %
@@ -682,6 +837,10 @@ def synchronized(name, external=False):
                     lock = _NoopContextManager()
 
                 with lock:
+                    if external:
+                        LOG.debug(_('Got file lock "%(lock)s" for '
+                                    'method "%(method)s"...' %
+                                    {'lock': name, 'method': f.__name__}))
                     retval = f(*args, **kwargs)
 
             # If no-one else is waiting for it, delete it.
@@ -718,7 +877,7 @@ def get_from_path(items, path):
     if items is None:
         return results
 
-    if not isinstance(items, types.ListType):
+    if not isinstance(items, list):
         # Wrap single objects in a list
         items = [items]
 
@@ -731,7 +890,7 @@ def get_from_path(items, path):
         child = get_method(first_token)
         if child is None:
             continue
-        if isinstance(child, types.ListType):
+        if isinstance(child, list):
             # Flatten intermediate lists
             for x in child:
                 results.append(x)
@@ -827,13 +986,15 @@ def gen_uuid():
 
 
 def is_uuid_like(val):
-    """For our purposes, a UUID is a string in canoical form:
+    """For our purposes, a UUID is a string in canonical form:
 
         aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
     """
-    if not isinstance(val, basestring):
+    try:
+        uuid.UUID(val)
+        return True
+    except (TypeError, ValueError, AttributeError):
         return False
-    return (len(val) == 36) and (val.count('-') == 4)
 
 
 def bool_from_str(val):
@@ -863,9 +1024,29 @@ def is_valid_ipv4(address):
     return True
 
 
+def is_valid_cidr(address):
+    """Check if the provided ipv4 or ipv6 address is a valid
+    CIDR address or not"""
+    try:
+        # Validate the correct CIDR Address
+        netaddr.IPNetwork(address)
+    except netaddr.core.AddrFormatError:
+        return False
+
+    # Prior validation partially verify /xx part
+    # Verify it here
+    ip_segment = address.split('/')
+
+    if (len(ip_segment) <= 1 or
+        ip_segment[1] == ''):
+        return False
+
+    return True
+
+
 def monkey_patch():
     """  If the Flags.monkey_patch set as True,
-    this functuion patches a decorator
+    this function patches a decorator
     for all functions in specified modules.
     You can set decorators for each modules
     using FLAGS.monkey_patch_modules.
@@ -910,3 +1091,321 @@ def convert_to_list_dict(lst, label):
     if not isinstance(lst, list):
         lst = [lst]
     return [{label: x} for x in lst]
+
+
+def timefunc(func):
+    """Decorator that logs how long a particular function took to execute"""
+    @functools.wraps(func)
+    def inner(*args, **kwargs):
+        start_time = time.time()
+        try:
+            return func(*args, **kwargs)
+        finally:
+            total_time = time.time() - start_time
+            LOG.debug(_("timefunc: '%(name)s' took %(total_time).2f secs") %
+                      dict(name=func.__name__, total_time=total_time))
+    return inner
+
+
+def generate_glance_url():
+    """Generate the URL to glance."""
+    # TODO(jk0): This will eventually need to take SSL into consideration
+    # when supported in glance.
+    return "http://%s:%d" % (FLAGS.glance_host, FLAGS.glance_port)
+
+
+@contextlib.contextmanager
+def save_and_reraise_exception():
+    """Save current exception, run some code and then re-raise.
+
+    In some cases the exception context can be cleared, resulting in None
+    being attempted to be reraised after an exception handler is run. This
+    can happen when eventlet switches greenthreads or when running an
+    exception handler, code raises and catches and exception. In both
+    cases the exception context will be cleared.
+
+    To work around this, we save the exception state, run handler code, and
+    then re-raise the original exception. If another exception occurs, the
+    saved exception is logged and the new exception is reraised.
+    """
+    type_, value, traceback = sys.exc_info()
+    try:
+        yield
+    except Exception:
+        LOG.exception(_('Original exception being dropped'),
+                      exc_info=(type_, value, traceback))
+        raise
+    raise type_, value, traceback
+
+
+@contextlib.contextmanager
+def logging_error(message):
+    """Catches exception, write message to the log, re-raise.
+    This is a common refinement of save_and_reraise that writes a specific
+    message to the log.
+    """
+    try:
+        yield
+    except Exception as error:
+        with save_and_reraise_exception():
+            LOG.exception(message)
+
+
+def make_dev_path(dev, partition=None, base='/dev'):
+    """Return a path to a particular device.
+
+    >>> make_dev_path('xvdc')
+    /dev/xvdc
+
+    >>> make_dev_path('xvdc', 1)
+    /dev/xvdc1
+    """
+    path = os.path.join(base, dev)
+    if partition:
+        path += str(partition)
+    return path
+
+
+def total_seconds(td):
+    """Local total_seconds implementation for compatibility with python 2.6"""
+    if hasattr(td, 'total_seconds'):
+        return td.total_seconds()
+    else:
+        return ((td.days * 86400 + td.seconds) * 10 ** 6 +
+                td.microseconds) / 10.0 ** 6
+
+
+def sanitize_hostname(hostname):
+    """Return a hostname which conforms to RFC-952 and RFC-1123 specs."""
+    if isinstance(hostname, unicode):
+        hostname = hostname.encode('latin-1', 'ignore')
+
+    hostname = re.sub('[ _]', '-', hostname)
+    hostname = re.sub('[^\w.-]+', '', hostname)
+    hostname = hostname.lower()
+    hostname = hostname.strip('.-')
+
+    return hostname
+
+
+def read_cached_file(filename, cache_info, reload_func=None):
+    """Read from a file if it has been modified.
+
+    :param cache_info: dictionary to hold opaque cache.
+    :param reload_func: optional function to be called with data when
+                        file is reloaded due to a modification.
+
+    :returns: data from file
+
+    """
+    mtime = os.path.getmtime(filename)
+    if not cache_info or mtime != cache_info.get('mtime'):
+        with open(filename) as fap:
+            cache_info['data'] = fap.read()
+        cache_info['mtime'] = mtime
+        if reload_func:
+            reload_func(cache_info['data'])
+    return cache_info['data']
+
+
+@contextlib.contextmanager
+def temporary_mutation(obj, **kwargs):
+    """Temporarily set the attr on a particular object to a given value then
+    revert when finished.
+
+    One use of this is to temporarily set the read_deleted flag on a context
+    object:
+
+        with temporary_mutation(context, read_deleted="yes"):
+            do_something_that_needed_deleted_objects()
+    """
+    NOT_PRESENT = object()
+
+    old_values = {}
+    for attr, new_value in kwargs.items():
+        old_values[attr] = getattr(obj, attr, NOT_PRESENT)
+        setattr(obj, attr, new_value)
+
+    try:
+        yield
+    finally:
+        for attr, old_value in old_values.items():
+            if old_value is NOT_PRESENT:
+                del obj[attr]
+            else:
+                setattr(obj, attr, old_value)
+
+
+def warn_deprecated_class(cls, msg):
+    """
+    Issues a warning to indicate that the given class is deprecated.
+    If a message is given, it is appended to the deprecation warning.
+    """
+
+    fullname = '%s.%s' % (cls.__module__, cls.__name__)
+    if msg:
+        fullmsg = _("Class %(fullname)s is deprecated: %(msg)s")
+    else:
+        fullmsg = _("Class %(fullname)s is deprecated")
+
+    # Issue the warning
+    warnings.warn(fullmsg % locals(), DeprecationWarning, stacklevel=3)
+
+
+def warn_deprecated_function(func, msg):
+    """
+    Issues a warning to indicate that the given function is
+    deprecated.  If a message is given, it is appended to the
+    deprecation warning.
+    """
+
+    name = func.__name__
+
+    # Find the function's definition
+    sourcefile = inspect.getsourcefile(func)
+
+    # Find the line number, if possible
+    if inspect.ismethod(func):
+        code = func.im_func.func_code
+    else:
+        code = func.func_code
+    lineno = getattr(code, 'co_firstlineno', None)
+
+    if lineno is None:
+        location = sourcefile
+    else:
+        location = "%s:%d" % (sourcefile, lineno)
+
+    # Build up the message
+    if msg:
+        fullmsg = _("Function %(name)s in %(location)s is deprecated: %(msg)s")
+    else:
+        fullmsg = _("Function %(name)s in %(location)s is deprecated")
+
+    # Issue the warning
+    warnings.warn(fullmsg % locals(), DeprecationWarning, stacklevel=3)
+
+
+def _stubout(klass, message):
+    """
+    Scans a class and generates wrapping stubs for __new__() and every
+    class and static method.  Returns a dictionary which can be passed
+    to type() to generate a wrapping class.
+    """
+
+    overrides = {}
+
+    def makestub_class(name, func):
+        """
+        Create a stub for wrapping class methods.
+        """
+
+        def stub(cls, *args, **kwargs):
+            warn_deprecated_class(klass, message)
+            return func(*args, **kwargs)
+
+        # Overwrite the stub's name
+        stub.__name__ = name
+        stub.func_name = name
+
+        return classmethod(stub)
+
+    def makestub_static(name, func):
+        """
+        Create a stub for wrapping static methods.
+        """
+
+        def stub(*args, **kwargs):
+            warn_deprecated_class(klass, message)
+            return func(*args, **kwargs)
+
+        # Overwrite the stub's name
+        stub.__name__ = name
+        stub.func_name = name
+
+        return staticmethod(stub)
+
+    for name, kind, _klass, _obj in inspect.classify_class_attrs(klass):
+        # We're only interested in __new__(), class methods, and
+        # static methods...
+        if (name != '__new__' and
+            kind not in ('class method', 'static method')):
+            continue
+
+        # Get the function...
+        func = getattr(klass, name)
+
+        # Override it in the class
+        if kind == 'class method':
+            stub = makestub_class(name, func)
+        elif kind == 'static method' or name == '__new__':
+            stub = makestub_static(name, func)
+
+        # Save it in the overrides dictionary...
+        overrides[name] = stub
+
+    # Apply the overrides
+    for name, stub in overrides.items():
+        setattr(klass, name, stub)
+
+
+def deprecated(message=''):
+    """
+    Marks a function, class, or method as being deprecated.  For
+    functions and methods, emits a warning each time the function or
+    method is called.  For classes, generates a new subclass which
+    will emit a warning each time the class is instantiated, or each
+    time any class or static method is called.
+
+    If a message is passed to the decorator, that message will be
+    appended to the emitted warning.  This may be used to suggest an
+    alternate way of achieving the desired effect, or to explain why
+    the function, class, or method is deprecated.
+    """
+
+    def decorator(f_or_c):
+        # Make sure we can deprecate it...
+        if not callable(f_or_c) or isinstance(f_or_c, types.ClassType):
+            warnings.warn("Cannot mark object %r as deprecated" % f_or_c,
+                          DeprecationWarning, stacklevel=2)
+            return f_or_c
+
+        # If we're deprecating a class, create a subclass of it and
+        # stub out all the class and static methods
+        if inspect.isclass(f_or_c):
+            klass = f_or_c
+            _stubout(klass, message)
+            return klass
+
+        # OK, it's a function; use a traditional wrapper...
+        func = f_or_c
+
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            warn_deprecated_function(func, message)
+
+            return func(*args, **kwargs)
+
+        return wrapper
+    return decorator
+
+
+def _showwarning(message, category, filename, lineno, file=None, line=None):
+    """
+    Redirect warnings into logging.
+    """
+
+    fmtmsg = warnings.formatwarning(message, category, filename, lineno, line)
+    LOG.warning(fmtmsg)
+
+
+# Install our warnings handler
+warnings.showwarning = _showwarning
+
+
+def service_is_up(service):
+    """Check whether a service is up based on last heartbeat."""
+    last_heartbeat = service['updated_at'] or service['created_at']
+    # Timestamps in DB are UTC.
+    elapsed = total_seconds(utcnow() - last_heartbeat)
+    return abs(elapsed) <= FLAGS.service_down_time

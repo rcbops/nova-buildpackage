@@ -23,13 +23,14 @@ Scheduler Service
 
 import functools
 
+from nova.compute import vm_states
 from nova import db
+from nova import exception
 from nova import flags
 from nova import log as logging
 from nova import manager
 from nova import rpc
 from nova import utils
-from nova.scheduler import zone_manager
 
 LOG = logging.getLogger('nova.scheduler.manager')
 FLAGS = flags.FLAGS
@@ -42,48 +43,43 @@ class SchedulerManager(manager.Manager):
     """Chooses a host to run instances on."""
 
     def __init__(self, scheduler_driver=None, *args, **kwargs):
-        self.zone_manager = zone_manager.ZoneManager()
         if not scheduler_driver:
             scheduler_driver = FLAGS.scheduler_driver
         self.driver = utils.import_object(scheduler_driver)
-        self.driver.set_zone_manager(self.zone_manager)
         super(SchedulerManager, self).__init__(*args, **kwargs)
 
     def __getattr__(self, key):
         """Converts all method calls to use the schedule method"""
         return functools.partial(self._schedule, key)
 
-    def periodic_tasks(self, context=None):
+    @manager.periodic_task
+    def _poll_child_zones(self, context):
         """Poll child zones periodically to get status."""
-        self.zone_manager.ping(context)
+        self.driver.poll_child_zones(context)
 
-    def get_host_list(self, context=None):
-        """Get a list of hosts from the ZoneManager."""
-        return self.zone_manager.get_host_list()
+    def get_host_list(self, context):
+        """Get a list of hosts from the HostManager."""
+        return self.driver.get_host_list()
 
-    def get_zone_list(self, context=None):
+    def get_zone_list(self, context):
         """Get a list of zones from the ZoneManager."""
-        return self.zone_manager.get_zone_list()
+        return self.driver.get_zone_list()
 
-    def get_zone_capabilities(self, context=None):
-        """Get the normalized set of capabilites for this zone."""
-        return self.zone_manager.get_zone_capabilities(context)
+    def get_service_capabilities(self, context):
+        """Get the normalized set of capabilities for this zone."""
+        return self.driver.get_service_capabilities()
 
-    def update_service_capabilities(self, context=None, service_name=None,
-                                                host=None, capabilities=None):
+    def update_service_capabilities(self, context, service_name=None,
+            host=None, capabilities=None, **kwargs):
         """Process a capability update from a service node."""
-        if not capabilities:
+        if capabilities is None:
             capabilities = {}
-        self.zone_manager.update_service_capabilities(service_name,
-                            host, capabilities)
+        self.driver.update_service_capabilities(service_name, host,
+                capabilities)
 
-    def select(self, context=None, *args, **kwargs):
+    def select(self, context, *args, **kwargs):
         """Select a list of hosts best matching the provided specs."""
         return self.driver.select(context, *args, **kwargs)
-
-    def get_scheduler_rules(self, context=None, *args, **kwargs):
-        """Ask the driver how requests should be made of it."""
-        return self.driver.get_scheduler_rules(context, *args, **kwargs)
 
     def _schedule(self, method, context, topic, *args, **kwargs):
         """Tries to call schedule_* method on the driver to retrieve host.
@@ -91,27 +87,45 @@ class SchedulerManager(manager.Manager):
         Falls back to schedule(context, topic) if method doesn't exist.
         """
         driver_method = 'schedule_%s' % method
-        elevated = context.elevated()
         try:
             real_meth = getattr(self.driver, driver_method)
-            args = (elevated,) + args
+            args = (context,) + args
         except AttributeError, e:
             LOG.warning(_("Driver Method %(driver_method)s missing: %(e)s."
                           "Reverting to schedule()") % locals())
             real_meth = self.driver.schedule
-            args = (elevated, topic) + args
-        host = real_meth(*args, **kwargs)
+            args = (context, topic, method) + args
 
-        if not host:
-            LOG.debug(_("%(topic)s %(method)s handled in Scheduler")
-                        % locals())
+        # Scheduler methods are responsible for casting.
+        try:
+            return real_meth(*args, **kwargs)
+        except exception.NoValidHost as ex:
+            self._set_instance_error(method, context, ex, *args, **kwargs)
+        except Exception as ex:
+            with utils.save_and_reraise_exception():
+                self._set_instance_error(method, context, ex, *args, **kwargs)
+
+    def _set_instance_error(self, method, context, ex, *args, **kwargs):
+        """Sets VM to Error state"""
+        LOG.warning(_("Failed to schedule_%(method)s: %(ex)s") % locals())
+        # FIXME(comstud): Re-factor this somehow.  Not sure this belongs
+        # in the scheduler manager like this.  Needs to support more than
+        # run_instance
+        if method != "run_instance":
             return
-
-        rpc.cast(context,
-                 db.queue_get_for(context, topic, host),
-                 {"method": method,
-                  "args": kwargs})
-        LOG.debug(_("Casted to %(topic)s %(host)s for %(method)s") % locals())
+        # FIXME(comstud): We should make this easier.  run_instance
+        # only sends a request_spec, and an instance may or may not
+        # have been created in the API (or scheduler) already.  If it
+        # was created, there's a 'uuid' set in the instance_properties
+        # of the request_spec.
+        request_spec = kwargs.get('request_spec', {})
+        properties = request_spec.get('instance_properties', {})
+        instance_uuid = properties.get('uuid', {})
+        if instance_uuid:
+            LOG.warning(_("Setting instance %(instance_uuid)s to "
+                    "ERROR state.") % locals())
+            db.instance_update(context, instance_uuid,
+                    {'vm_state': vm_states.ERROR})
 
     # NOTE (masumotok) : This method should be moved to nova.api.ec2.admin.
     #                    Based on bexar design summit discussion,
@@ -129,6 +143,9 @@ class SchedulerManager(manager.Manager):
                 'local_gb_used': 64}
 
         """
+        # Update latest compute_node table
+        topic = db.queue_get_for(context, FLAGS.compute_topic, host)
+        rpc.call(context, topic, {"method": "update_available_resource"})
 
         # Getting compute node info and related instances info
         compute_ref = db.service_get_all_compute_by_host(context, host)
@@ -152,17 +169,21 @@ class SchedulerManager(manager.Manager):
         project_ids = [i['project_id'] for i in instance_refs]
         project_ids = list(set(project_ids))
         for project_id in project_ids:
-            vcpus = [i['vcpus'] for i in instance_refs \
-                if i['project_id'] == project_id]
+            vcpus = [i['vcpus'] for i in instance_refs
+                     if i['project_id'] == project_id]
 
-            mem = [i['memory_mb']  for i in instance_refs \
-                if i['project_id'] == project_id]
+            mem = [i['memory_mb'] for i in instance_refs
+                   if i['project_id'] == project_id]
 
-            disk = [i['local_gb']  for i in instance_refs \
-                if i['project_id'] == project_id]
+            root = [i['root_gb'] for i in instance_refs
+                    if i['project_id'] == project_id]
 
-            usage[project_id] = {'vcpus': reduce(lambda x, y: x + y, vcpus),
-                                 'memory_mb': reduce(lambda x, y: x + y, mem),
-                                 'local_gb': reduce(lambda x, y: x + y, disk)}
+            ephemeral = [i['ephemeral_gb'] for i in instance_refs
+                         if i['project_id'] == project_id]
+
+            usage[project_id] = {'vcpus': sum(vcpus),
+                                 'memory_mb': sum(mem),
+                                 'root_gb': sum(root),
+                                 'ephemeral_gb': sum(ephemeral)}
 
         return {'resource': resource, 'usage': usage}

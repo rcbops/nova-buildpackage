@@ -1,5 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
+# Copyright 2011 OpenStack LLC.
 # Copyright 2010 United States Government as represented by the
 # Administrator of the National Aeronautics and Space Administration.
 # All Rights Reserved.
@@ -38,6 +39,7 @@ import traceback
 
 import nova
 from nova import flags
+from nova import local
 from nova import version
 
 
@@ -62,11 +64,13 @@ flags.DEFINE_list('default_log_levels',
                   ['amqplib=WARN',
                    'sqlalchemy=WARN',
                    'boto=WARN',
+                   'suds=INFO',
                    'eventlet.wsgi.server=WARN'],
                   'list of logger=LEVEL pairs')
 flags.DEFINE_bool('use_syslog', False, 'output to syslog')
 flags.DEFINE_bool('publish_errors', False, 'publish error events')
 flags.DEFINE_string('logfile', None, 'output to named file')
+flags.DEFINE_bool('use_stderr', True, 'log to standard error')
 
 
 # A list of things we want to replicate from logging.
@@ -129,7 +133,7 @@ def _get_log_file_path(binary=None):
 class NovaLogger(logging.Logger):
     """NovaLogger manages request context and formatting.
 
-    This becomes the class that is instanciated by logging.getLogger.
+    This becomes the class that is instantiated by logging.getLogger.
 
     """
 
@@ -148,24 +152,61 @@ class NovaLogger(logging.Logger):
                 level = globals()[level_name]
         self.setLevel(level)
 
-    def _log(self, level, msg, args, exc_info=None, extra=None, context=None):
-        """Extract context from any log call."""
-        if not extra:
-            extra = {}
+    def _update_extra(self, params):
+        if 'extra' not in params:
+            params['extra'] = {}
+        extra = params['extra']
+        context = None
+        if 'context' in params:
+            context = params['context']
+            del params['context']
+        if not context:
+            context = getattr(local.store, 'context', None)
         if context:
             extra.update(_dictify_context(context))
         extra.update({"nova_version": version.version_string_with_vcs()})
-        return logging.Logger._log(self, level, msg, args, exc_info, extra)
+
+    def log(self, lvl, msg, *args, **kwargs):
+        self._update_extra(kwargs)
+        logging.Logger.log(self, lvl, msg, *args, **kwargs)
+
+    def debug(self, msg, *args, **kwargs):
+        self._update_extra(kwargs)
+        logging.Logger.debug(self, msg, *args, **kwargs)
+
+    def info(self, msg, *args, **kwargs):
+        self._update_extra(kwargs)
+        logging.Logger.info(self, msg, *args, **kwargs)
+
+    def warn(self, msg, *args, **kwargs):
+        self._update_extra(kwargs)
+        logging.Logger.warn(self, msg, *args, **kwargs)
+
+    def warning(self, msg, *args, **kwargs):
+        self._update_extra(kwargs)
+        logging.Logger.warning(self, msg, *args, **kwargs)
+
+    def error(self, msg, *args, **kwargs):
+        self._update_extra(kwargs)
+        logging.Logger.error(self, msg, *args, **kwargs)
+
+    def critical(self, msg, *args, **kwargs):
+        self._update_extra(kwargs)
+        logging.Logger.critical(self, msg, *args, **kwargs)
+
+    def fatal(self, msg, *args, **kwargs):
+        self._update_extra(kwargs)
+        logging.Logger.fatal(self, msg, *args, **kwargs)
+
+    def audit(self, msg, *args, **kwargs):
+        """Shortcut for our AUDIT level."""
+        self._update_extra(kwargs)
+        self.log(AUDIT, msg, *args, **kwargs)
 
     def addHandler(self, handler):
         """Each handler gets our custom formatter."""
         handler.setFormatter(_formatter)
         return logging.Logger.addHandler(self, handler)
-
-    def audit(self, msg, *args, **kwargs):
-        """Shortcut for our AUDIT level."""
-        if self.isEnabledFor(AUDIT):
-            self._log(AUDIT, msg, args, **kwargs)
 
     def exception(self, msg, *args, **kwargs):
         """Logging.exception doesn't handle kwargs, so breaks context."""
@@ -238,21 +279,21 @@ class NovaRootLogger(NovaLogger):
     def __init__(self, name, level=NOTSET):
         self.logpath = None
         self.filelog = None
-        self.streamlog = StreamHandler()
+        self.streamlog = None
         self.syslog = None
         NovaLogger.__init__(self, name, level)
 
     def setup_from_flags(self):
         """Setup logger from flags."""
         global _filelog
+        if self.syslog:
+            self.removeHandler(self.syslog)
+            self.syslog = None
         if FLAGS.use_syslog:
             self.syslog = SysLogHandler(address='/dev/log')
             self.addHandler(self.syslog)
-        elif self.syslog:
-            self.removeHandler(self.syslog)
         logpath = _get_log_file_path()
         if logpath:
-            self.removeHandler(self.streamlog)
             if logpath != self.logpath:
                 self.removeHandler(self.filelog)
                 self.filelog = WatchedFileHandler(logpath)
@@ -265,6 +306,11 @@ class NovaRootLogger(NovaLogger):
                     os.chmod(self.logpath, mode)
         else:
             self.removeHandler(self.filelog)
+        if self.streamlog:
+            self.removeHandler(self.streamlog)
+            self.streamlog = None
+        if FLAGS.use_stderr:
+            self.streamlog = StreamHandler()
             self.addHandler(self.streamlog)
         if FLAGS.publish_errors:
             self.addHandler(PublishErrorsHandler(ERROR))
@@ -318,8 +364,8 @@ logging.setLoggerClass(NovaLogger)
 
 
 def audit(msg, *args, **kwargs):
-    """Shortcut for logging to root log with sevrity 'AUDIT'."""
-    logging.root.log(AUDIT, msg, *args, **kwargs)
+    """Shortcut for logging to root log with severity 'AUDIT'."""
+    logging.root.audit(msg, *args, **kwargs)
 
 
 class WritableLogger(object):

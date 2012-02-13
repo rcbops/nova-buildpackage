@@ -87,9 +87,9 @@ class ComputeDriver(object):
     virtual network interface, and these IDs are opaque to the rest of Nova.
 
     Some methods here take an instance of nova.compute.service.Instance.  This
-    is the datastructure used by nova.compute to store details regarding an
+    is the data structure used by nova.compute to store details regarding an
     instance, and pass them into this layer.  This layer is responsible for
-    translating that generic datastructure into terms that are specific to the
+    translating that generic data structure into terms that are specific to the
     virtualization platform.
 
     """
@@ -127,7 +127,7 @@ class ComputeDriver(object):
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
 
-    def spawn(self, context, instance,
+    def spawn(self, context, instance, image_meta,
               network_info=None, block_device_info=None):
         """
         Create a new instance/VM/domain on the virtualization platform.
@@ -143,13 +143,16 @@ class ComputeDriver(object):
         :param instance: Instance object as returned by DB layer.
                          This function should use the data there to guide
                          the creation of the new instance.
+        :param image_meta: image object returned by nova.image.glance that
+                           defines the image from which to boot this instance
         :param network_info:
            :py:meth:`~nova.network.manager.NetworkManager.get_instance_nw_info`
-        :param block_device_info:
+        :param block_device_info: Information about block devices to be
+                                  attached to the instance.
         """
         raise NotImplementedError()
 
-    def destroy(self, instance, network_info, cleanup=True):
+    def destroy(self, instance, network_info, block_device_info=None):
         """Destroy (shutdown and delete) the specified instance.
 
         If the instance is not found (for example if networking failed), this
@@ -159,18 +162,20 @@ class ComputeDriver(object):
         :param instance: Instance object as returned by DB layer.
         :param network_info:
            :py:meth:`~nova.network.manager.NetworkManager.get_instance_nw_info`
-        :param cleanup:
+        :param block_device_info: Information about block devices that should
+                                  be detached from the instance.
 
         """
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
 
-    def reboot(self, instance, network_info):
+    def reboot(self, instance, network_info, reboot_type):
         """Reboot the specified instance.
 
         :param instance: Instance object as returned by DB layer.
         :param network_info:
            :py:meth:`~nova.network.manager.NetworkManager.get_instance_nw_info`
+        :param reboot_type: Either a HARD or SOFT reboot
         """
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
@@ -190,9 +195,18 @@ class ComputeDriver(object):
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
 
+    def get_vnc_console(self, instance):
+        # TODO(Vek): Need to pass context in for access to auth_token
+        raise NotImplementedError()
+
     def get_diagnostics(self, instance):
         """Return data about VM diagnostics"""
         # TODO(Vek): Need to pass context in for access to auth_token
+        raise NotImplementedError()
+
+    def get_all_bw_usage(self, start_time, stop_time=None):
+        """Return bandwidth usage info for each interface on each
+           running VM"""
         raise NotImplementedError()
 
     def get_host_ip_addr(self):
@@ -202,12 +216,12 @@ class ComputeDriver(object):
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
 
-    def attach_volume(self, context, instance_id, volume_id, mountpoint):
-        """Attach the disk at device_path to the instance at mountpoint"""
+    def attach_volume(self, connection_info, instance_name, mountpoint):
+        """Attach the disk to the instance at mountpoint using info"""
         raise NotImplementedError()
 
-    def detach_volume(self, context, instance_id, volume_id):
-        """Detach the disk attached to the instance at mountpoint"""
+    def detach_volume(self, connection_info, instance_name, mountpoint):
+        """Detach the disk attached to the instance"""
         raise NotImplementedError()
 
     def compare_cpu(self, cpu_info):
@@ -224,12 +238,12 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
-    def migrate_disk_and_power_off(self, instance, dest):
+    def migrate_disk_and_power_off(self, context, instance, dest,
+                                   instance_type):
         """
         Transfers the disk of a running instance in multiple phases, turning
         off the instance before the end.
         """
-        # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
 
     def snapshot(self, context, instance, image_id):
@@ -243,47 +257,63 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
-    def finish_migration(self, context, instance, disk_info, network_info,
-                         resize_instance):
+    def finish_migration(self, context, migration, instance, disk_info,
+                         network_info, image_meta, resize_instance):
         """Completes a resize, turning on the migrated instance
 
         :param network_info:
            :py:meth:`~nova.network.manager.NetworkManager.get_instance_nw_info`
+        :param image_meta: image object returned by nova.image.glance that
+                           defines the image from which this instance
+                           was created
         """
         raise NotImplementedError()
 
-    def revert_migration(self, instance):
-        """Reverts a resize, powering back on the instance"""
+    def confirm_migration(self, migration, instance, network_info):
+        """Confirms a resize, destroying the source VM"""
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
 
-    def pause(self, instance, callback):
+    def finish_revert_migration(self, instance):
+        """Finish reverting a resize, powering back on the instance"""
+        # TODO(Vek): Need to pass context in for access to auth_token
+        raise NotImplementedError()
+
+    def pause(self, instance):
         """Pause the specified instance."""
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
 
-    def unpause(self, instance, callback):
+    def unpause(self, instance):
         """Unpause paused VM instance"""
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
 
-    def suspend(self, instance, callback):
+    def suspend(self, instance):
         """suspend the specified instance"""
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
 
-    def resume(self, instance, callback):
+    def resume(self, instance):
         """resume the specified instance"""
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
 
-    def rescue(self, context, instance, callback, network_info):
+    def rescue(self, context, instance, network_info, image_meta):
         """Rescue the specified instance"""
         raise NotImplementedError()
 
-    def unrescue(self, instance, callback, network_info):
+    def unrescue(self, instance, network_info):
         """Unrescue the specified instance"""
         # TODO(Vek): Need to pass context in for access to auth_token
+        raise NotImplementedError()
+
+    def power_off(self, instance):
+        """Power off the specified instance."""
+        raise NotImplementedError()
+
+    def power_on(self, instance):
+        """Power on the specified instance"""
         raise NotImplementedError()
 
     def update_available_resource(self, ctxt, host):
@@ -338,7 +368,7 @@ class ComputeDriver(object):
         This message is sent to the virtualization drivers on hosts that are
         running an instance that belongs to a security group that has a rule
         that references the security group identified by `security_group_id`.
-        It is the responsiblity of this method to make sure any rules
+        It is the responsibility of this method to make sure any rules
         that authorize traffic flow with members of the security group are
         updated and any new members can communicate, and any removed members
         cannot.
@@ -374,7 +404,7 @@ class ComputeDriver(object):
 
         When this is called, rules have either been added or removed from the
         datastore.  You can retrieve rules with
-        :method:`nova.db.api.provider_fw_rule_get_all`.
+        :method:`nova.db.provider_fw_rule_get_all`.
 
         Provider rules take precedence over security group rules.  If an IP
         would be allowed by a security group ingress rule, but blocked by
@@ -463,8 +493,18 @@ class ComputeDriver(object):
         # TODO(Vek): Need to pass context in for access to auth_token
         pass
 
+    def poll_rebooting_instances(self, timeout):
+        """Poll for rebooting instances"""
+        # TODO(Vek): Need to pass context in for access to auth_token
+        raise NotImplementedError()
+
     def poll_rescued_instances(self, timeout):
         """Poll for rescued instances"""
+        # TODO(Vek): Need to pass context in for access to auth_token
+        raise NotImplementedError()
+
+    def poll_unconfirmed_resizes(self, resize_confirm_window):
+        """Poll for unconfirmed resizes"""
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
 
@@ -478,8 +518,12 @@ class ComputeDriver(object):
         raise NotImplementedError()
 
     def plug_vifs(self, instance, network_info):
-        """Plugs in VIFs to networks."""
+        """Plug VIFs into networks."""
         # TODO(Vek): Need to pass context in for access to auth_token
+        raise NotImplementedError()
+
+    def unplug_vifs(self, instance, network_info):
+        """Unplug VIFs from networks."""
         raise NotImplementedError()
 
     def update_host_status(self):

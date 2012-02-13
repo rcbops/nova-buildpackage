@@ -18,7 +18,6 @@
 from nova import flags
 from nova import log as logging
 from nova.network.quantum import client as quantum_client
-from nova import utils
 
 
 LOG = logging.getLogger("nova.network.quantum.quantum_connection")
@@ -52,13 +51,19 @@ class QuantumClientConnection(object):
                                             format="json",
                                             logger=LOG)
 
-    def create_network(self, tenant_id, network_name):
+    def create_network(self, tenant_id, network_name, **kwargs):
         """Create network using specified name, return Quantum
            network UUID.
         """
         data = {'network': {'name': network_name}}
+        for kw in kwargs:
+            data['network'][kw] = kwargs[kw]
         resdict = self.client.create_network(data, tenant=tenant_id)
         return resdict["network"]["id"]
+
+    def get_network_name(self, tenant_id, network_id):
+        net = self.client.show_network_details(network_id, tenant=tenant_id)
+        return net["network"]["name"]
 
     def delete_network(self, tenant_id, net_id):
         """Deletes Quantum network with specified UUID."""
@@ -71,11 +76,16 @@ class QuantumClientConnection(object):
         try:
             self.client.show_network_details(net_id, tenant=tenant_id)
             return True
-        except client.QuantumNotFoundException:
+        except quantum_client.QuantumNotFoundException:
             # Not really an error.  Real errors will be propogated to caller
             return False
 
-    def create_and_attach_port(self, tenant_id, net_id, interface_id):
+    def get_networks(self, tenant_id):
+        """Retrieve all networks for this tenant"""
+        return self.client.list_networks(tenant=tenant_id)
+
+    def create_and_attach_port(self, tenant_id, net_id, interface_id,
+                               **kwargs):
         """Creates a Quantum port on the specified network, sets
            status to ACTIVE to enable traffic, and attaches the
            vNIC with the specified interface-id.
@@ -83,6 +93,8 @@ class QuantumClientConnection(object):
         LOG.debug(_("Connecting interface %(interface_id)s to "
                     "net %(net_id)s for %(tenant_id)s" % locals()))
         port_data = {'port': {'state': 'ACTIVE'}}
+        for kw in kwargs:
+            port_data['port'][kw] = kwargs[kw]
         resdict = self.client.create_port(net_id, port_data, tenant=tenant_id)
         port_id = resdict["port"]["id"]
 
@@ -98,21 +110,34 @@ class QuantumClientConnection(object):
         self.client.detach_resource(net_id, port_id, tenant=tenant_id)
         self.client.delete_port(net_id, port_id, tenant=tenant_id)
 
-    def get_port_by_attachment(self, tenant_id, attachment_id):
-        """Given a tenant, search for the Quantum network and port
-           UUID that has the specified interface-id attachment.
+    def get_port_by_attachment(self, tenant_id, net_id, attachment_id):
+        """Given a tenant and network, search for the port UUID that
+           has the specified interface-id attachment.
         """
         # FIXME(danwent): this will be inefficient until the Quantum
         # API implements querying a port by the interface-id
-        net_list_resdict = self.client.list_networks(tenant=tenant_id)
-        for n in net_list_resdict["networks"]:
-            net_id = n['id']
-            port_list_resdict = self.client.list_ports(net_id,
-                                            tenant=tenant_id)
-            for p in port_list_resdict["ports"]:
-                port_id = p["id"]
-                port_get_resdict = self.client.show_port_attachment(net_id,
+        port_list_resdict = self.client.list_ports(net_id, tenant=tenant_id)
+        for p in port_list_resdict["ports"]:
+            port_id = p["id"]
+            port_get_resdict = self.client.show_port_attachment(net_id,
                                 port_id, tenant=tenant_id)
-                if attachment_id == port_get_resdict["attachment"]["id"]:
-                    return (net_id, port_id)
-        return (None, None)
+            # Skip ports without an attachment
+            if "id" not in port_get_resdict["attachment"]:
+                continue
+            if attachment_id == port_get_resdict["attachment"]["id"]:
+                return port_id
+        return None
+
+    def get_attached_ports(self, tenant_id, network_id):
+        rv = []
+        port_list = self.client.list_ports(network_id, tenant=tenant_id)
+        for p in port_list["ports"]:
+            port_id = p["id"]
+            port = self.client.show_port_attachment(network_id,
+                                port_id, tenant=tenant_id)
+            # Skip ports without an attachment
+            if "id" not in port["attachment"]:
+                continue
+            rv.append({'port-id': port_id, 'attachment':
+                       port["attachment"]["id"]})
+        return rv

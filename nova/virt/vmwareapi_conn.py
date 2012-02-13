@@ -124,42 +124,42 @@ class VMWareESXConnection(driver.ComputeDriver):
         """List VM instances."""
         return self._vmops.list_instances()
 
-    def spawn(self, context, instance, network_info,
+    def spawn(self, context, instance, image_meta, network_info,
               block_device_mapping=None):
         """Create VM instance."""
-        self._vmops.spawn(context, instance, network_info)
+        self._vmops.spawn(context, instance, image_meta, network_info)
 
     def snapshot(self, context, instance, name):
         """Create snapshot from a running VM instance."""
         self._vmops.snapshot(context, instance, name)
 
-    def reboot(self, instance, network_info):
+    def reboot(self, instance, network_info, reboot_type):
         """Reboot VM instance."""
         self._vmops.reboot(instance, network_info)
 
-    def destroy(self, instance, network_info, cleanup=True):
+    def destroy(self, instance, network_info, block_device_info=None):
         """Destroy VM instance."""
         self._vmops.destroy(instance, network_info)
 
-    def pause(self, instance, callback):
+    def pause(self, instance):
         """Pause VM instance."""
-        self._vmops.pause(instance, callback)
+        self._vmops.pause(instance)
 
-    def unpause(self, instance, callback):
+    def unpause(self, instance):
         """Unpause paused VM instance."""
-        self._vmops.unpause(instance, callback)
+        self._vmops.unpause(instance)
 
-    def suspend(self, instance, callback):
+    def suspend(self, instance):
         """Suspend the specified instance."""
-        self._vmops.suspend(instance, callback)
+        self._vmops.suspend(instance)
 
-    def resume(self, instance, callback):
+    def resume(self, instance):
         """Resume the suspended VM instance."""
-        self._vmops.resume(instance, callback)
+        self._vmops.resume(instance)
 
-    def get_info(self, instance_id):
+    def get_info(self, instance_name):
         """Return info about the VM instance."""
-        return self._vmops.get_info(instance_id)
+        return self._vmops.get_info(instance_name)
 
     def get_diagnostics(self, instance):
         """Return data about VM diagnostics."""
@@ -173,11 +173,11 @@ class VMWareESXConnection(driver.ComputeDriver):
         """Return link to instance's ajax console."""
         return self._vmops.get_ajax_console(instance)
 
-    def attach_volume(self, instance_name, device_path, mountpoint):
+    def attach_volume(self, connection_info, instance_name, mountpoint):
         """Attach volume storage to VM instance."""
         pass
 
-    def detach_volume(self, instance_name, mountpoint):
+    def detach_volume(self, connection_info, instance_name, mountpoint):
         """Detach volume storage to VM instance."""
         pass
 
@@ -200,8 +200,12 @@ class VMWareESXConnection(driver.ComputeDriver):
         pass
 
     def plug_vifs(self, instance, network_info):
-        """Plugs in VIFs to networks."""
+        """Plug VIFs into networks."""
         self._vmops.plug_vifs(instance, network_info)
+
+    def unplug_vifs(self, instance, network_info):
+        """Unplug VIFs from networks."""
+        self._vmops.unplug_vifs(instance, network_info)
 
 
 class VMWareAPISession(object):
@@ -347,20 +351,20 @@ class VMWareAPISession(object):
             self._create_session()
         return self.vim
 
-    def _wait_for_task(self, instance_id, task_ref):
+    def _wait_for_task(self, instance_uuid, task_ref):
         """
         Return a Deferred that will give the result of the given task.
         The task is polled until it completes.
         """
         done = event.Event()
-        loop = utils.LoopingCall(self._poll_task, instance_id, task_ref,
+        loop = utils.LoopingCall(self._poll_task, instance_uuid, task_ref,
                                       done)
         loop.start(FLAGS.vmwareapi_task_poll_interval, now=True)
         ret_val = done.wait()
         loop.stop()
         return ret_val
 
-    def _poll_task(self, instance_id, task_ref, done):
+    def _poll_task(self, instance_uuid, task_ref, done):
         """
         Poll the given task, and fires the given Deferred if we
         get a result.
@@ -370,7 +374,7 @@ class VMWareAPISession(object):
                             task_ref, "Task", "info")
             task_name = task_info.name
             action = dict(
-                instance_id=int(instance_id),
+                instance_uuid=instance_uuid,
                 action=task_name[0:255],
                 error=None)
             if task_info.state in ['queued', 'running']:

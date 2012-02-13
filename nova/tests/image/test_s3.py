@@ -15,7 +15,11 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import os
+
 from nova import context
+import nova.db.api
+from nova import exception
 from nova import test
 from nova.image import s3
 
@@ -48,6 +52,8 @@ ami_manifest_xml = """<?xml version="1.0" ?>
                                 <device>sda3</device>
                         </mapping>
                 </block_device_mapping>
+                <kernel_id>aki-00000001</kernel_id>
+                <ramdisk_id>ari-00000001</ramdisk_id>
         </machine_configuration>
 </manifest>
 """
@@ -59,6 +65,10 @@ class TestS3ImageService(test.TestCase):
         self.flags(image_service='nova.image.fake.FakeImageService')
         self.image_service = s3.S3ImageService()
         self.context = context.RequestContext(None, None)
+
+        # set up one fixture to test shows, should have id '1'
+        nova.db.api.s3_image_create(self.context,
+                                    '155d900f-4e14-4e4c-a73d-069cbf4541e6')
 
     def _assertEqualList(self, list0, list1, keys):
         self.assertEqual(len(list0), len(list1))
@@ -72,6 +82,17 @@ class TestS3ImageService(test.TestCase):
                     for k in keys:
                         self.assertEqual(x[k], y[k])
 
+    def test_show_cannot_use_uuid(self):
+        self.assertRaises(exception.ImageNotFound,
+                          self.image_service.show, self.context,
+                          '155d900f-4e14-4e4c-a73d-069cbf4541e6')
+
+    def test_show_translates_correctly(self):
+        self.image_service.show(self.context, '1')
+
+    def test_detail(self):
+        self.image_service.detail(self.context)
+
     def test_s3_create(self):
         metadata = {'properties': {
             'root_device_name': '/dev/sda1',
@@ -83,11 +104,10 @@ class TestS3ImageService(test.TestCase):
                  'virutal_name': 'ephemeral0'},
                 {'device_name': '/dev/sdb0',
                  'no_device': True}]}}
-        _manifest, image = self.image_service._s3_parse_manifest(
+        _manifest, image, image_uuid = self.image_service._s3_parse_manifest(
             self.context, metadata, ami_manifest_xml)
-        image_id = image['id']
 
-        ret_image = self.image_service.show(self.context, image_id)
+        ret_image = self.image_service.show(self.context, image['id'])
         self.assertTrue('properties' in ret_image)
         properties = ret_image['properties']
 
@@ -112,3 +132,11 @@ class TestS3ImageService(test.TestCase):
             {'device_name': '/dev/sdb0',
              'no_device': True}]
         self.assertEqual(block_device_mapping, expected_bdm)
+
+    def test_s3_malicious_tarballs(self):
+        self.assertRaises(exception.Error,
+            self.image_service._test_for_malicious_tarball,
+            "/unused", os.path.join(os.path.dirname(__file__), 'abs.tar.gz'))
+        self.assertRaises(exception.Error,
+            self.image_service._test_for_malicious_tarball,
+            "/unused", os.path.join(os.path.dirname(__file__), 'rel.tar.gz'))

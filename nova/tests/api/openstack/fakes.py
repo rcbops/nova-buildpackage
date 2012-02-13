@@ -15,33 +15,34 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import copy
-import random
-import string
+import datetime
 
+import routes
 import webob
 import webob.dec
-from paste import urlmap
+import webob.request
 
 from glance import client as glance_client
-from glance.common import exception as glance_exc
 
+from nova.api import auth as api_auth
+from nova.api import openstack as openstack_api
+from nova.api.openstack import compute
+from nova.api.openstack import auth
+from nova.api.openstack.compute import extensions
+from nova.api.openstack.compute import limits
+from nova.api.openstack import urlmap
+from nova.api.openstack.compute import versions
+from nova.api.openstack import wsgi as os_wsgi
+from nova.auth.manager import User, Project
+from nova.compute import instance_types
+from nova.compute import vm_states
 from nova import context
+from nova.db.sqlalchemy import models
 from nova import exception as exc
+import nova.image.fake
+from nova.tests.glance import stubs as glance_stubs
 from nova import utils
 from nova import wsgi
-import nova.api.openstack.auth
-from nova.api import openstack
-from nova.api import auth as api_auth
-from nova.api.openstack import auth
-from nova.api.openstack import extensions
-from nova.api.openstack import versions
-from nova.api.openstack import limits
-from nova.auth.manager import User, Project
-import nova.image.fake
-from nova.image import glance
-from nova.image import service
-from nova.tests import fake_flags
 
 
 class Context(object):
@@ -49,7 +50,7 @@ class Context(object):
 
 
 class FakeRouter(wsgi.Router):
-    def __init__(self):
+    def __init__(self, ext_mgr=None):
         pass
 
     @webob.dec.wsgify
@@ -72,34 +73,29 @@ def fake_wsgi(self, req):
     return self.application
 
 
-def wsgi_app(inner_app10=None, inner_app11=None, fake_auth=True,
-        fake_auth_context=None):
-    if not inner_app10:
-        inner_app10 = openstack.APIRouterV10()
-    if not inner_app11:
-        inner_app11 = openstack.APIRouterV11()
+def wsgi_app(inner_app_v2=None, fake_auth=True, fake_auth_context=None,
+        use_no_auth=False, ext_mgr=None):
+    if not inner_app_v2:
+        inner_app_v2 = compute.APIRouter(ext_mgr)
 
     if fake_auth:
         if fake_auth_context is not None:
             ctxt = fake_auth_context
         else:
-            ctxt = context.RequestContext('fake', 'fake')
-        api10 = openstack.FaultWrapper(api_auth.InjectContext(ctxt,
-              limits.RateLimitingMiddleware(inner_app10)))
-        api11 = openstack.FaultWrapper(api_auth.InjectContext(ctxt,
-              limits.RateLimitingMiddleware(
-                  extensions.ExtensionMiddleware(inner_app11))))
+            ctxt = context.RequestContext('fake', 'fake', auth_token=True)
+        api_v2 = openstack_api.FaultWrapper(api_auth.InjectContext(ctxt,
+              limits.RateLimitingMiddleware(inner_app_v2)))
+    elif use_no_auth:
+        api_v2 = openstack_api.FaultWrapper(auth.NoAuthMiddleware(
+              limits.RateLimitingMiddleware(inner_app_v2)))
     else:
-        api10 = openstack.FaultWrapper(auth.AuthMiddleware(
-              limits.RateLimitingMiddleware(inner_app10)))
-        api11 = openstack.FaultWrapper(auth.AuthMiddleware(
-              limits.RateLimitingMiddleware(
-                  extensions.ExtensionMiddleware(inner_app11))))
-        Auth = auth
+        api_v2 = openstack_api.FaultWrapper(auth.AuthMiddleware(
+              limits.RateLimitingMiddleware(inner_app_v2)))
+
     mapper = urlmap.URLMap()
-    mapper['/v1.0'] = api10
-    mapper['/v1.1'] = api11
-    mapper['/'] = openstack.FaultWrapper(versions.Versions())
+    mapper['/v2'] = api_v2
+    mapper['/v1.1'] = api_v2
+    mapper['/'] = openstack_api.FaultWrapper(versions.Versions())
     return mapper
 
 
@@ -117,10 +113,10 @@ def stub_out_key_pair_funcs(stubs, have_key_pair=True):
         return []
 
     if have_key_pair:
-        stubs.Set(nova.db.api, 'key_pair_get_all_by_user', key_pair)
-        stubs.Set(nova.db.api, 'key_pair_get', one_key_pair)
+        stubs.Set(nova.db, 'key_pair_get_all_by_user', key_pair)
+        stubs.Set(nova.db, 'key_pair_get', one_key_pair)
     else:
-        stubs.Set(nova.db.api, 'key_pair_get_all_by_user', no_key_pair)
+        stubs.Set(nova.db, 'key_pair_get_all_by_user', no_key_pair)
 
 
 def stub_out_image_service(stubs):
@@ -135,9 +131,9 @@ def stub_out_auth(stubs):
     def fake_auth_init(self, app):
         self.application = app
 
-    stubs.Set(nova.api.openstack.auth.AuthMiddleware,
+    stubs.Set(auth.AuthMiddleware,
         '__init__', fake_auth_init)
-    stubs.Set(nova.api.openstack.auth.AuthMiddleware,
+    stubs.Set(auth.AuthMiddleware,
         '__call__', fake_wsgi)
 
 
@@ -146,10 +142,10 @@ def stub_out_rate_limiting(stubs):
         super(limits.RateLimitingMiddleware, self).__init__(app)
         self.application = app
 
-    stubs.Set(nova.api.openstack.limits.RateLimitingMiddleware,
+    stubs.Set(nova.api.openstack.compute.limits.RateLimitingMiddleware,
         '__init__', fake_rate_init)
 
-    stubs.Set(nova.api.openstack.limits.RateLimitingMiddleware,
+    stubs.Set(nova.api.openstack.compute.limits.RateLimitingMiddleware,
         '__call__', fake_wsgi)
 
 
@@ -160,21 +156,102 @@ def stub_out_networking(stubs):
 
 
 def stub_out_compute_api_snapshot(stubs):
-    def snapshot(self, context, instance_id, name, extra_properties=None):
-        props = dict(instance_id=instance_id, instance_ref=instance_id)
-        props.update(extra_properties or {})
-        return dict(id='123', status='ACTIVE', name=name, properties=props)
+
+    def snapshot(self, context, instance, name, extra_properties=None):
+        return dict(id='123', status='ACTIVE', name=name,
+                    properties=extra_properties)
+
     stubs.Set(nova.compute.API, 'snapshot', snapshot)
 
 
-def stub_out_compute_api_backup(stubs):
-    def backup(self, context, instance_id, name, backup_type, rotation,
+class stub_out_compute_api_backup(object):
+
+    def __init__(self, stubs):
+        self.stubs = stubs
+        self.extra_props_last_call = None
+        stubs.Set(nova.compute.API, 'backup', self.backup)
+
+    def backup(self, context, instance, name, backup_type, rotation,
                extra_properties=None):
-        props = dict(instance_id=instance_id, instance_ref=instance_id,
-                     backup_type=backup_type, rotation=rotation)
+        self.extra_props_last_call = extra_properties
+        props = dict(backup_type=backup_type,
+                     rotation=rotation)
         props.update(extra_properties or {})
         return dict(id='123', status='ACTIVE', name=name, properties=props)
-    stubs.Set(nova.compute.API, 'backup', backup)
+
+
+def stub_out_nw_api_get_instance_nw_info(stubs, func=None):
+    def get_instance_nw_info(self, context, instance):
+        return [(None, {'label': 'public',
+                         'ips': [{'ip': '192.168.0.3'}],
+                         'ip6s': []})]
+
+    if func is None:
+        func = get_instance_nw_info
+    stubs.Set(nova.network.API, 'get_instance_nw_info', func)
+
+
+def stub_out_nw_api_get_floating_ips_by_fixed_address(stubs, func=None):
+    def get_floating_ips_by_fixed_address(self, context, fixed_ip):
+        return ['1.2.3.4']
+
+    if func is None:
+        func = get_floating_ips_by_fixed_address
+    stubs.Set(nova.network.API, 'get_floating_ips_by_fixed_address', func)
+
+
+def stub_out_nw_api(stubs, cls=None, private=None, publics=None):
+    if not private:
+        private = '192.168.0.3'
+    if not publics:
+        publics = ['1.2.3.4']
+
+    class Fake:
+        def get_instance_nw_info(*args, **kwargs):
+            return [(None, {'label': 'private',
+                            'ips': [{'ip': private}]})]
+
+        def get_floating_ips_by_fixed_address(*args, **kwargs):
+            return publics
+
+    if cls is None:
+        cls = Fake
+    stubs.Set(nova.network, 'API', cls)
+
+
+def _make_image_fixtures():
+    NOW_GLANCE_FORMAT = "2010-10-11T10:30:22"
+
+    image_id = 123
+    base_attrs = {'deleted': False}
+
+    fixtures = []
+
+    def add_fixture(**kwargs):
+        kwargs.update(base_attrs)
+        fixtures.append(kwargs)
+
+    # Public image
+    add_fixture(id=image_id, name='public image', is_public=True,
+                status='active', properties={'key1': 'value1'},
+                min_ram="128", min_disk="10")
+    image_id += 1
+
+    # Snapshot for User 1
+    uuid = 'aa640691-d1a7-4a67-9d3c-d35ee6b3cc74'
+    server_ref = 'http://localhost/v2/servers/' + uuid
+    snapshot_properties = {'instance_uuid': uuid, 'user_id': 'fake'}
+    for status in ('queued', 'saving', 'active', 'killed',
+                   'deleted', 'pending_delete'):
+        add_fixture(id=image_id, name='%s snapshot' % status,
+                    is_public=False, status=status,
+                    properties=snapshot_properties)
+        image_id += 1
+
+    # Image without a name
+    add_fixture(id=image_id, is_public=True, status='active', properties={})
+
+    return fixtures
 
 
 def stub_out_glance_add_image(stubs, sent_to_glance):
@@ -192,91 +269,11 @@ def stub_out_glance_add_image(stubs, sent_to_glance):
     stubs.Set(glance_client.Client, 'add_image', fake_add_image)
 
 
-def stub_out_glance(stubs, initial_fixtures=None):
-
-    class FakeGlanceClient:
-
-        def __init__(self, initial_fixtures):
-            self.fixtures = initial_fixtures or []
-
-        def _filter_images(self, filters=None, marker=None, limit=None):
-            found = True
-            if marker:
-                found = False
-            if limit == 0:
-                limit = None
-
-            fixtures = []
-            count = 0
-            for f in self.fixtures:
-                if limit and count >= limit:
-                    break
-                if found:
-                    fixtures.append(f)
-                    count = count + 1
-                if f['id'] == marker:
-                    found = True
-
-            return fixtures
-
-        def fake_get_images(self, filters=None, marker=None, limit=None):
-            fixtures = self._filter_images(filters, marker, limit)
-            return [dict(id=f['id'], name=f['name'])
-                    for f in fixtures]
-
-        def fake_get_images_detailed(self, filters=None,
-                                     marker=None, limit=None):
-            return self._filter_images(filters, marker, limit)
-
-        def fake_get_image_meta(self, image_id):
-            image = self._find_image(image_id)
-            if image:
-                return copy.deepcopy(image)
-            raise glance_exc.NotFound
-
-        def fake_add_image(self, image_meta, data=None):
-            image_meta = copy.deepcopy(image_meta)
-            image_id = ''.join(random.choice(string.letters)
-                               for _ in range(20))
-            image_meta['id'] = image_id
-            self.fixtures.append(image_meta)
-            return copy.deepcopy(image_meta)
-
-        def fake_update_image(self, image_id, image_meta, data=None):
-            for attr in ('created_at', 'updated_at', 'deleted_at', 'deleted'):
-                if attr in image_meta:
-                    del image_meta[attr]
-
-            f = self._find_image(image_id)
-            if not f:
-                raise glance_exc.NotFound
-
-            f.update(image_meta)
-            return copy.deepcopy(f)
-
-        def fake_delete_image(self, image_id):
-            f = self._find_image(image_id)
-            if not f:
-                raise glance_exc.NotFound
-
-            self.fixtures.remove(f)
-
-        def _find_image(self, image_id):
-            for f in self.fixtures:
-                if str(f['id']) == str(image_id):
-                    return f
-            return None
-
-    GlanceClient = glance_client.Client
-    fake = FakeGlanceClient(initial_fixtures)
-
-    stubs.Set(GlanceClient, 'get_images', fake.fake_get_images)
-    stubs.Set(GlanceClient, 'get_images_detailed',
-              fake.fake_get_images_detailed)
-    stubs.Set(GlanceClient, 'get_image_meta', fake.fake_get_image_meta)
-    stubs.Set(GlanceClient, 'add_image', fake.fake_add_image)
-    stubs.Set(GlanceClient, 'update_image', fake.fake_update_image)
-    stubs.Set(GlanceClient, 'delete_image', fake.fake_delete_image)
+def stub_out_glance(stubs):
+    def fake_get_image_service():
+        client = glance_stubs.StubGlanceClient(_make_image_fixtures())
+        return nova.image.glance.GlanceImageService(client)
+    stubs.Set(nova.image, 'get_default_image_service', fake_get_image_service)
 
 
 class FakeToken(object):
@@ -293,10 +290,30 @@ class FakeToken(object):
             setattr(self, k, v)
 
 
-class FakeRequestContext(object):
-    def __init__(self, user, project, *args, **kwargs):
-        self.user_id = 1
-        self.project_id = 1
+class FakeRequestContext(context.RequestContext):
+    def __init__(self, *args, **kwargs):
+        kwargs['auth_token'] = kwargs.get('auth_token', 'fake_auth_token')
+        return super(FakeRequestContext, self).__init__(*args, **kwargs)
+
+
+class HTTPRequest(webob.Request):
+
+    @classmethod
+    def blank(cls, *args, **kwargs):
+        kwargs['base_url'] = 'http://localhost/v2'
+        use_admin_context = kwargs.pop('use_admin_context', False)
+        out = webob.Request.blank(*args, **kwargs)
+        out.environ['nova.context'] = FakeRequestContext('fake_user', 'fake',
+                is_admin=use_admin_context)
+        return out
+
+
+class TestRouter(wsgi.Router):
+    def __init__(self, controller):
+        mapper = routes.Mapper()
+        mapper.resource("test", "tests",
+                        controller=os_wsgi.Resource(controller))
+        super(TestRouter, self).__init__(mapper)
 
 
 class FakeAuthDatabase(object):
@@ -433,3 +450,95 @@ class FakeRateLimiter(object):
     @webob.dec.wsgify
     def __call__(self, req):
         return self.application
+
+
+FAKE_UUID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+
+
+def create_info_cache(nw_cache):
+    if nw_cache is None:
+        return {}
+
+    if not isinstance(nw_cache, basestring):
+        nw_cache = utils.dumps(nw_cache)
+
+    return {"info_cache": {"network_info": nw_cache}}
+
+
+def stub_instance(id, user_id='fake', project_id='fake', host=None,
+                  vm_state=None, task_state=None,
+                  reservation_id="", uuid=FAKE_UUID, image_ref="10",
+                  flavor_id="1", name=None, key_name='',
+                  access_ipv4=None, access_ipv6=None, progress=0,
+                  auto_disk_config=False, display_name=None,
+                  include_fake_metadata=True,
+                  power_state=None, nw_cache=None):
+
+    if include_fake_metadata:
+        metadata = [models.InstanceMetadata(key='seq', value=id)]
+    else:
+        metadata = []
+
+    inst_type = instance_types.get_instance_type_by_flavor_id(int(flavor_id))
+
+    if host is not None:
+        host = str(host)
+
+    if key_name:
+        key_data = 'FAKE'
+    else:
+        key_data = ''
+
+    # ReservationID isn't sent back, hack it in there.
+    server_name = name or "server%s" % id
+    if reservation_id != "":
+        server_name = "reservation_%s" % (reservation_id, )
+
+    info_cache = create_info_cache(nw_cache)
+
+    instance = {
+        "id": int(id),
+        "created_at": datetime.datetime(2010, 10, 10, 12, 0, 0),
+        "updated_at": datetime.datetime(2010, 11, 11, 11, 0, 0),
+        "admin_pass": "",
+        "user_id": user_id,
+        "project_id": project_id,
+        "image_ref": image_ref,
+        "kernel_id": "",
+        "ramdisk_id": "",
+        "launch_index": 0,
+        "key_name": key_name,
+        "key_data": key_data,
+        "vm_state": vm_state or vm_states.BUILDING,
+        "task_state": task_state,
+        "power_state": power_state,
+        "memory_mb": 0,
+        "vcpus": 0,
+        "root_gb": 0,
+        "ephemeral_gb": 0,
+        "hostname": "",
+        "host": host,
+        "instance_type": dict(inst_type),
+        "user_data": "",
+        "reservation_id": reservation_id,
+        "mac_address": "",
+        "scheduled_at": utils.utcnow(),
+        "launched_at": utils.utcnow(),
+        "terminated_at": utils.utcnow(),
+        "availability_zone": "",
+        "display_name": display_name or server_name,
+        "display_description": "",
+        "locked": False,
+        "metadata": metadata,
+        "access_ip_v4": access_ipv4,
+        "access_ip_v6": access_ipv6,
+        "uuid": uuid,
+        "progress": progress,
+        "auto_disk_config": auto_disk_config,
+        "name": "instance-%s" % id,
+        "shutdown_terminate": True,
+        "disable_terminate": False}
+
+    instance.update(info_cache)
+
+    return instance

@@ -51,8 +51,10 @@ A fake XenAPI SDK.
 """
 
 
+import json
 import random
 import uuid
+from xml.sax.saxutils import escape
 
 from pprint import pformat
 
@@ -144,6 +146,7 @@ def create_vdi(name_label, read_only, sr_ref, sharable):
                            'xenstore_data': '',
                            'sm_config': {},
                            'physical_utilisation': '123',
+                           'managed': True,
                            'VBDs': {}})
 
 
@@ -315,6 +318,21 @@ def check_for_session_leaks():
                               _db_content['session'])
 
 
+def as_value(s):
+    """Helper function for simulating XenAPI plugin responses.  It
+    escapes and wraps the given argument."""
+    return '<value>%s</value>' % escape(s)
+
+
+def as_json(*args, **kwargs):
+    """Helper function for simulating XenAPI plugin responses for those
+    that are returning JSON.  If this function is given plain arguments,
+    then these are rendered as a JSON list.  If it's given keyword
+    arguments then these are rendered as a JSON dict."""
+    arg = args or kwargs
+    return json.dumps(arg)
+
+
 class Failure(Exception):
     def __init__(self, details):
         self.details = details
@@ -352,6 +370,65 @@ class SessionBase(object):
         rec['currently_attached'] = False
         rec['device'] = ''
 
+    def PBD_create(self, _1, pbd_rec):
+        pbd_ref = _create_object('PBD', pbd_rec)
+        _db_content['PBD'][pbd_ref]['currently_attached'] = False
+        return pbd_ref
+
+    def PBD_plug(self, _1, pbd_ref):
+        rec = get_record('PBD', pbd_ref)
+        if rec['currently_attached']:
+            raise Failure(['DEVICE_ALREADY_ATTACHED', rec])
+        rec['currently_attached'] = True
+        sr_ref = rec['SR']
+        _db_content['SR'][sr_ref]['PBDs'] = [pbd_ref]
+
+    def PBD_unplug(self, _1, pbd_ref):
+        rec = get_record('PBD', pbd_ref)
+        if not rec['currently_attached']:
+            raise Failure(['DEVICE_ALREADY_DETACHED', rec])
+        rec['currently_attached'] = False
+        sr_ref = pbd_ref['SR']
+        _db_content['SR'][sr_ref]['PBDs'].remove(pbd_ref)
+
+    def SR_introduce(self, _1, sr_uuid, label, desc, type, content_type,
+                     shared, sm_config):
+        host_ref = _db_content['host'].keys()[0]
+
+        ref = None
+        rec = None
+        for ref, rec in _db_content['SR'].iteritems():
+            if rec.get('uuid') == sr_uuid:
+                break
+        if rec:
+            # make forgotten = 0 and return ref
+            _db_content['SR'][ref]['forgotten'] = 0
+            return ref
+        else:
+            # SR not found in db, so we create one
+            params = {}
+            params.update(locals())
+            del params['self']
+            sr_ref = _create_object('SR', params)
+            _db_content['SR'][sr_ref]['uuid'] = sr_uuid
+            _db_content['SR'][sr_ref]['forgotten'] = 0
+            if type in ('iscsi'):
+                # Just to be clear
+                vdi_per_lun = True
+            if vdi_per_lun:
+                # we need to create a vdi because this introduce
+                # is likely meant for a single vdi
+                vdi_ref = create_vdi('', False, sr_ref, False)
+                _db_content['SR'][sr_ref]['VDIs'] = [vdi_ref]
+                _db_content['VDI'][vdi_ref]['SR'] = sr_ref
+            return sr_ref
+
+    def SR_forget(self, _1, sr_ref):
+        _db_content['SR'][sr_ref]['forgotten'] = 1
+
+    def SR_scan(self, _1, sr_ref):
+        return
+
     def PIF_get_all_records_where(self, _1, _2):
         # TODO (salvatore-orlando): filter table on _2
         return _db_content['PIF']
@@ -375,11 +452,28 @@ class SessionBase(object):
         #Always return 12GB available
         return 12 * 1024 * 1024 * 1024
 
-    def host_call_plugin(self, *args):
-        return 'herp'
+    def host_call_plugin(self, _1, _2, plugin, method, _5):
+        if (plugin, method) == ('agent', 'version'):
+            return as_json(returncode='0', message='1.0')
+        elif (plugin, method) == ('glance', 'copy_kernel_vdi'):
+            return ''
+        elif (plugin, method) == ('glance', 'upload_vhd'):
+            return ''
+        elif (plugin, method) == ('migration', 'move_vhds_into_sr'):
+            return ''
+        elif (plugin, method) == ('migration', 'transfer_vhd'):
+            return ''
+        else:
+            raise Exception('No simulation in host_call_plugin for %s,%s' %
+                            (plugin, method))
+
+    def VDI_get_virtual_size(self, *args):
+        return 1 * 1024 * 1024 * 1024
 
     def VDI_resize_online(self, *args):
         return 'derp'
+
+    VDI_resize = VDI_resize_online
 
     def VM_clean_reboot(self, *args):
         return 'burp'
@@ -562,7 +656,10 @@ class SessionBase(object):
         task = _db_content['task'][task_ref]
         func = name[len('Async.'):]
         try:
-            task['result'] = self.xenapi_request(func, params[1:])
+            result = self.xenapi_request(func, params[1:])
+            if result:
+                result = as_value(result)
+            task['result'] = result
             task['status'] = 'success'
         except Failure, exc:
             task['error_info'] = exc.details
@@ -573,7 +670,7 @@ class SessionBase(object):
     def _check_session(self, params):
         if (self._session is None or
             self._session not in _db_content['session']):
-                raise Failure(['HANDLE_INVALID', 'session', self._session])
+            raise Failure(['HANDLE_INVALID', 'session', self._session])
         if len(params) == 0 or params[0] != self._session:
             LOG.debug(_('Raising NotImplemented'))
             raise NotImplementedError('Call to XenAPI without using .xenapi')

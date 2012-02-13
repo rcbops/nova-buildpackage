@@ -17,7 +17,6 @@
 import json
 import operator
 
-import nova.scheduler
 from nova.scheduler.filters import abstract_filter
 
 
@@ -87,18 +86,11 @@ class JsonFilter(abstract_filter.AbstractHostFilter):
         'and': _and,
     }
 
-    def instance_type_to_filter(self, instance_type):
-        """Convert instance_type into JSON filter object."""
-        required_ram = instance_type['memory_mb']
-        required_disk = instance_type['local_gb']
-        query = ['and',
-                ['>=', '$compute.host_memory_free', required_ram],
-                ['>=', '$compute.disk_available', required_disk]]
-        return (self._full_name(), json.dumps(query))
-
-    def _parse_string(self, string, host, services):
+    def _parse_string(self, string, host_state):
         """Strings prefixed with $ are capability lookups in the
-        form '$service.capability[.subcap*]'.
+        form '$variable' where 'variable' is an attribute in the
+        HostState class.  If $variable is a dictionary, you may
+        use: $variable.dictkey
         """
         if not string:
             return None
@@ -106,13 +98,16 @@ class JsonFilter(abstract_filter.AbstractHostFilter):
             return string
 
         path = string[1:].split(".")
-        for item in path:
-            services = services.get(item, None)
-            if not services:
+        obj = getattr(host_state, path[0], None)
+        if obj is None:
+            return None
+        for item in path[1:]:
+            obj = obj.get(item, None)
+            if obj is None:
                 return None
-        return services
+        return obj
 
-    def _process_filter(self, zone_manager, query, host, services):
+    def _process_filter(self, query, host_state):
         """Recursively parse the query structure."""
         if not query:
             return True
@@ -121,26 +116,30 @@ class JsonFilter(abstract_filter.AbstractHostFilter):
         cooked_args = []
         for arg in query[1:]:
             if isinstance(arg, list):
-                arg = self._process_filter(zone_manager, arg, host, services)
+                arg = self._process_filter(arg, host_state)
             elif isinstance(arg, basestring):
-                arg = self._parse_string(arg, host, services)
+                arg = self._parse_string(arg, host_state)
             if arg is not None:
                 cooked_args.append(arg)
         result = method(self, cooked_args)
         return result
 
-    def filter_hosts(self, zone_manager, query):
+    def host_passes(self, host_state, filter_properties):
         """Return a list of hosts that can fulfill the requirements
         specified in the query.
         """
-        expanded = json.loads(query)
-        filtered_hosts = []
-        for host, services in zone_manager.service_states.iteritems():
-            result = self._process_filter(zone_manager, expanded, host,
-                    services)
-            if isinstance(result, list):
-                # If any succeeded, include the host
-                result = any(result)
-            if result:
-                filtered_hosts.append((host, services))
-        return filtered_hosts
+        query = filter_properties.get('query', None)
+        if not query:
+            return True
+
+        # NOTE(comstud): Not checking capabilities or service for
+        # enabled/disabled so that a provided json filter can decide
+
+        result = self._process_filter(json.loads(query), host_state)
+        if isinstance(result, list):
+            # If any succeeded, include the host
+            result = any(result)
+        if result:
+            # Filter it out.
+            return True
+        return False

@@ -17,6 +17,8 @@
 Handles all requests relating to schedulers.
 """
 
+import functools
+
 from novaclient import v1_1 as novaclient
 from novaclient import exceptions as novaclient_exceptions
 
@@ -58,12 +60,12 @@ def get_host_list(context):
 
 
 def get_zone_list(context):
-    """Return a list of zones assoicated with this zone."""
+    """Return a list of zones associated with this zone."""
     items = _call_scheduler('get_zone_list', context)
     for item in items:
         item['api_url'] = item['api_url'].replace('\\/', '/')
     if not items:
-        items = db.zone_get_all(context)
+        items = db.zone_get_all(context.elevated())
     return items
 
 
@@ -85,7 +87,20 @@ def zone_update(context, zone_id, data):
 
 def get_zone_capabilities(context):
     """Returns a dict of key, value capabilities for this zone."""
-    return _call_scheduler('get_zone_capabilities', context=context)
+
+    zone_capabs = {}
+
+    # First grab the capabilities of combined services.
+    service_capabs = _call_scheduler('get_service_capabilities', context)
+    for item, (min_value, max_value) in service_capabs.iteritems():
+        zone_capabs[item] = "%s,%s" % (min_value, max_value)
+
+    # Add the capabilities defined by FLAGS
+    caps = FLAGS.zone_capabilities
+    for cap in caps:
+        key, value = cap.split('=')
+        zone_capabs[key] = value
+    return zone_capabs
 
 
 def select(context, specs=None):
@@ -114,16 +129,19 @@ def call_zone_method(context, method_name, errors_to_ignore=None,
     pool = greenpool.GreenPool()
     results = []
     if zones is None:
-        zones = db.zone_get_all(context)
+        zones = db.zone_get_all(context.elevated())
     for zone in zones:
         try:
+            # Do this on behalf of the user ...
             nova = novaclient.Client(zone.username, zone.password, None,
-                    zone.api_url)
+                    zone.api_url, region_name=zone.name,
+                    token=context.auth_token)
             nova.authenticate()
         except novaclient_exceptions.BadRequest, e:
             url = zone.api_url
-            LOG.warn(_("Failed request to zone; URL=%(url)s: %(e)s")
-                    % locals())
+            name = zone.name
+            LOG.warn(_("Authentication failed to zone "
+                       "'%(name)s' URL=%(url)s: %(e)s") % locals())
             #TODO (dabo) - add logic for failure counts per zone,
             # with escalation after a given number of failures.
             continue
@@ -144,25 +162,20 @@ def call_zone_method(context, method_name, errors_to_ignore=None,
     return [(zone.id, res.wait()) for zone, res in results]
 
 
-def child_zone_helper(zone_list, func):
+def child_zone_helper(context, zone_list, func):
     """Fire off a command to each zone in the list.
     The return is [novaclient return objects] from each child zone.
     For example, if you are calling server.pause(), the list will
     be whatever the response from server.pause() is. One entry
     per child zone called."""
 
-    def _wrap_method(function, arg1):
-        """Wrap method to supply an argument."""
-        def _wrap(*args, **kwargs):
-            return function(arg1, *args, **kwargs)
-        return _wrap
-
-    def _process(func, zone):
+    def _process(func, context, zone):
         """Worker stub for green thread pool. Give the worker
         an authenticated nova client and zone info."""
         try:
             nova = novaclient.Client(zone.username, zone.password, None,
-                    zone.api_url)
+                    zone.api_url, region_name=zone.name,
+                    token=context.auth_token)
             nova.authenticate()
         except novaclient_exceptions.BadRequest, e:
             url = zone.api_url
@@ -174,11 +187,15 @@ def child_zone_helper(zone_list, func):
             # there if no other zones had a response.
             return exception.ZoneRequestError()
         else:
-            return func(nova, zone)
+            try:
+                answer = func(nova, zone)
+                return answer
+            except Exception, e:
+                return e
 
     green_pool = greenpool.GreenPool()
     return [result for result in green_pool.imap(
-                    _wrap_method(_process, func), zone_list)]
+                    functools.partial(_process, func, context), zone_list)]
 
 
 def _issue_novaclient_command(nova, zone, collection,
@@ -211,11 +228,11 @@ def _issue_novaclient_command(nova, zone, collection,
     item = args.pop(0)
     try:
         result = manager.get(item)
-    except novaclient_exceptions.NotFound:
+    except novaclient_exceptions.NotFound, e:
         url = zone.api_url
         LOG.debug(_("%(collection)s '%(item)s' not found on '%(url)s'" %
                                                 locals()))
-        return None
+        raise e
 
     if method_name.lower() != 'get':
         # if we're doing something other than 'get', call it passing args.
@@ -278,7 +295,7 @@ class reroute_compute(object):
 
         # Ask the children to provide an answer ...
         LOG.debug(_("Asking child zones ..."))
-        result = self._call_child_zones(zones,
+        result = self._call_child_zones(context, zones,
                     wrap_novaclient_function(_issue_novaclient_command,
                            collection, self.method_name, item_uuid))
         # Scrub the results and raise another exception
@@ -286,6 +303,7 @@ class reroute_compute(object):
         raise RedirectResult(self.unmarshall_result(result))
 
     def __call__(self, f):
+        @functools.wraps(f)
         def wrapped_f(*args, **kwargs):
             collection, context, item_id_or_uuid = \
                             self.get_collection_context_and_id(args, kwargs)
@@ -318,16 +336,22 @@ class reroute_compute(object):
 
         return wrapped_f
 
-    def _call_child_zones(self, zones, function):
+    def _call_child_zones(self, context, zones, function):
         """Ask the child zones to perform this operation.
         Broken out for testing."""
-        return child_zone_helper(zones, function)
+        return child_zone_helper(context, zones, function)
 
     def get_collection_context_and_id(self, args, kwargs):
         """Returns a tuple of (novaclient collection name, security
            context and resource id. Derived class should override this."""
         context = kwargs.get('context', None)
         instance_id = kwargs.get('instance_id', None)
+
+        #NOTE(blamar): This is going to get worse before it gets better...
+        instance = kwargs.get('instance', None)
+        if instance is not None:
+            instance_id = instance['uuid']
+
         if len(args) > 0 and not context:
             context = args[1]
         if len(args) > 1 and not instance_id:
@@ -342,7 +366,7 @@ class reroute_compute(object):
         """
         if 'instance_id' in kwargs:
             kwargs['instance_id'] = replacement_id
-        elif len(args) > 1:
+        elif len(args) > 2:
             args.pop(2)
             args.insert(2, replacement_id)
 
@@ -369,11 +393,19 @@ class reroute_compute(object):
                     del server[k]
 
             reduced_response.append(dict(server=server))
+
+        # Boil the responses down to a single response.
+        #
+        # If we get a happy response use that, ignore all the
+        # complaint repsonses ...
         if reduced_response:
             return reduced_response[0]  # first for now.
         elif found_exception:
-            raise found_exception
-        raise exception.InstanceNotFound(instance_id=self.item_uuid)
+            return found_exception
+
+        # Some operations, like delete(), don't send back any results
+        # on success. We'll do the same.
+        return None
 
 
 def redirect_handler(f):
@@ -381,5 +413,9 @@ def redirect_handler(f):
         try:
             return f(*args, **kwargs)
         except RedirectResult, e:
+            # Remember: exceptions are returned, not thrown, in the decorator.
+            # At this point it's safe to throw it.
+            if isinstance(e.results, BaseException):
+                raise e.results
             return e.results
     return new_f

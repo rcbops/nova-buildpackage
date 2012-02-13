@@ -14,14 +14,20 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import __builtin__
+import mox
 import datetime
 import os
 import tempfile
 
 import nova
 from nova import exception
+from nova import flags
 from nova import test
 from nova import utils
+
+
+FLAGS = flags.FLAGS
 
 
 class ExecuteTestCase(test.TestCase):
@@ -73,7 +79,14 @@ exit 1
     def test_unknown_kwargs_raises_error(self):
         self.assertRaises(exception.Error,
                           utils.execute,
-                          '/bin/true', this_is_not_a_valid_kwarg=True)
+                          '/usr/bin/env', 'true',
+                          this_is_not_a_valid_kwarg=True)
+
+    def test_check_exit_code_boolean(self):
+        utils.execute('/usr/bin/env', 'false', check_exit_code=False)
+        self.assertRaises(exception.ProcessExecutionError,
+                          utils.execute,
+                          '/usr/bin/env', 'false', check_exit_code=True)
 
     def test_no_retry_on_success(self):
         fd, tmpfilename = tempfile.mkstemp()
@@ -278,6 +291,30 @@ class GenericUtilsTestCase(test.TestCase):
         result = utils.parse_server_string('www.exa:mple.com:8443')
         self.assertEqual(('', ''), result)
 
+    def test_hostname_unicode_sanitization(self):
+        hostname = u"\u7684.test.example.com"
+        self.assertEqual("test.example.com",
+                         utils.sanitize_hostname(hostname))
+
+    def test_hostname_sanitize_periods(self):
+        hostname = "....test.example.com..."
+        self.assertEqual("test.example.com",
+                         utils.sanitize_hostname(hostname))
+
+    def test_hostname_sanitize_dashes(self):
+        hostname = "----test.example.com---"
+        self.assertEqual("test.example.com",
+                         utils.sanitize_hostname(hostname))
+
+    def test_hostname_sanitize_characters(self):
+        hostname = "(#@&$!(@*--#&91)(__=+--test-host.example!!.com-0+"
+        self.assertEqual("91----test-host.example.com-0",
+                         utils.sanitize_hostname(hostname))
+
+    def test_hostname_translate(self):
+        hostname = "<}\x1fh\x10e\x08l\x02l\x05o\x12!{>"
+        self.assertEqual("hello", utils.sanitize_hostname(hostname))
+
     def test_bool_from_str(self):
         self.assertTrue(utils.bool_from_str('1'))
         self.assertTrue(utils.bool_from_str('2'))
@@ -290,6 +327,58 @@ class GenericUtilsTestCase(test.TestCase):
         self.assertFalse(utils.bool_from_str('0'))
         self.assertFalse(utils.bool_from_str(None))
         self.assertFalse(utils.bool_from_str('junk'))
+
+    def test_generate_glance_url(self):
+        generated_url = utils.generate_glance_url()
+        actual_url = "http://%s:%d" % (FLAGS.glance_host, FLAGS.glance_port)
+        self.assertEqual(generated_url, actual_url)
+
+    def test_read_cached_file(self):
+        self.mox.StubOutWithMock(os.path, "getmtime")
+        os.path.getmtime(mox.IgnoreArg()).AndReturn(1)
+        self.mox.ReplayAll()
+
+        cache_data = {"data": 1123, "mtime": 1}
+        data = utils.read_cached_file("/this/is/a/fake", cache_data)
+        self.assertEqual(cache_data["data"], data)
+
+    def test_read_modified_cached_file(self):
+        self.mox.StubOutWithMock(os.path, "getmtime")
+        self.mox.StubOutWithMock(__builtin__, 'open')
+        os.path.getmtime(mox.IgnoreArg()).AndReturn(2)
+
+        fake_contents = "lorem ipsum"
+        fake_file = self.mox.CreateMockAnything()
+        fake_file.read().AndReturn(fake_contents)
+        fake_context_manager = self.mox.CreateMockAnything()
+        fake_context_manager.__enter__().AndReturn(fake_file)
+        fake_context_manager.__exit__(mox.IgnoreArg(),
+                                      mox.IgnoreArg(),
+                                      mox.IgnoreArg())
+
+        __builtin__.open(mox.IgnoreArg()).AndReturn(fake_context_manager)
+
+        self.mox.ReplayAll()
+        cache_data = {"data": 1123, "mtime": 1}
+        self.reload_called = False
+
+        def test_reload(reloaded_data):
+            self.assertEqual(reloaded_data, fake_contents)
+            self.reload_called = True
+
+        data = utils.read_cached_file("/this/is/a/fake", cache_data,
+                                                reload_func=test_reload)
+        self.mox.UnsetStubs()
+        self.assertEqual(data, fake_contents)
+        self.assertTrue(self.reload_called)
+
+    def test_generate_password(self):
+        password = utils.generate_password()
+        self.assertTrue([c for c in password if c in '0123456789'])
+        self.assertTrue([c for c in password
+                         if c in 'abcdefghijklmnopqrstuvwxyz'])
+        self.assertTrue([c for c in password
+                         if c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'])
 
 
 class IsUUIDLikeTestCase(test.TestCase):
@@ -308,6 +397,13 @@ class IsUUIDLikeTestCase(test.TestCase):
     def test_non_uuid_string_passed(self):
         val = 'foo-fooo'
         self.assertUUIDLike(val, False)
+
+    def test_non_uuid_string_passed2(self):
+        val = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
+        self.assertUUIDLike(val, False)
+
+    def test_gen_valid_uuid(self):
+        self.assertUUIDLike(str(utils.gen_uuid()), True)
 
 
 class ToPrimitiveTestCase(test.TestCase):
@@ -393,8 +489,8 @@ class ToPrimitiveTestCase(test.TestCase):
         ret = utils.to_primitive(x)
         self.assertEquals(len(ret), 3)
         self.assertTrue(ret[0].startswith(u"<module 'datetime' from "))
-        self.assertTrue(ret[1].startswith(u'<function foo at 0x'))
-        self.assertEquals(ret[2], u'<built-in function dir>')
+        self.assertTrue(ret[1].startswith('<function foo at 0x'))
+        self.assertEquals(ret[2], '<built-in function dir>')
 
 
 class MonkeyPatchTestCase(test.TestCase):
@@ -439,3 +535,147 @@ class MonkeyPatchTestCase(test.TestCase):
             in nova.tests.monkey_patch_example.CALLED_FUNCTION)
         self.assertFalse(package_b + 'ExampleClassB.example_method_add'
             in nova.tests.monkey_patch_example.CALLED_FUNCTION)
+
+
+class DeprecationTest(test.TestCase):
+    def setUp(self):
+        super(DeprecationTest, self).setUp()
+
+        def fake_warn_deprecated_class(cls, msg):
+            self.warn = ('class', cls, msg)
+
+        def fake_warn_deprecated_function(func, msg):
+            self.warn = ('function', func, msg)
+
+        self.stubs.Set(utils, 'warn_deprecated_class',
+                       fake_warn_deprecated_class)
+        self.stubs.Set(utils, 'warn_deprecated_function',
+                       fake_warn_deprecated_function)
+        self.warn = None
+
+    def test_deprecated_function_no_message(self):
+        def test_function():
+            pass
+
+        decorated = utils.deprecated()(test_function)
+
+        decorated()
+        self.assertEqual(self.warn, ('function', test_function, ''))
+
+    def test_deprecated_function_with_message(self):
+        def test_function():
+            pass
+
+        decorated = utils.deprecated('string')(test_function)
+
+        decorated()
+        self.assertEqual(self.warn, ('function', test_function, 'string'))
+
+    def test_deprecated_class_no_message(self):
+        @utils.deprecated()
+        class TestClass(object):
+            pass
+
+        TestClass()
+        self.assertEqual(self.warn, ('class', TestClass, ''))
+
+    def test_deprecated_class_with_message(self):
+        @utils.deprecated('string')
+        class TestClass(object):
+            pass
+
+        TestClass()
+        self.assertEqual(self.warn, ('class', TestClass, 'string'))
+
+    def test_deprecated_classmethod_no_message(self):
+        @utils.deprecated()
+        class TestClass(object):
+            @classmethod
+            def class_method(cls):
+                pass
+
+        TestClass.class_method()
+        self.assertEqual(self.warn, ('class', TestClass, ''))
+
+    def test_deprecated_classmethod_with_message(self):
+        @utils.deprecated('string')
+        class TestClass(object):
+            @classmethod
+            def class_method(cls):
+                pass
+
+        TestClass.class_method()
+        self.assertEqual(self.warn, ('class', TestClass, 'string'))
+
+    def test_deprecated_staticmethod_no_message(self):
+        @utils.deprecated()
+        class TestClass(object):
+            @staticmethod
+            def static_method():
+                pass
+
+        TestClass.static_method()
+        self.assertEqual(self.warn, ('class', TestClass, ''))
+
+    def test_deprecated_staticmethod_with_message(self):
+        @utils.deprecated('string')
+        class TestClass(object):
+            @staticmethod
+            def static_method():
+                pass
+
+        TestClass.static_method()
+        self.assertEqual(self.warn, ('class', TestClass, 'string'))
+
+    def test_deprecated_instancemethod(self):
+        @utils.deprecated()
+        class TestClass(object):
+            def instance_method(self):
+                pass
+
+        # Instantiate the class...
+        obj = TestClass()
+        self.assertEqual(self.warn, ('class', TestClass, ''))
+
+        # Reset warn...
+        self.warn = None
+
+        # Call the instance method...
+        obj.instance_method()
+
+        # Make sure that did *not* generate a warning
+        self.assertEqual(self.warn, None)
+
+    def test_service_is_up(self):
+        fts_func = datetime.datetime.fromtimestamp
+        fake_now = 1000
+        down_time = 5
+
+        self.flags(service_down_time=down_time)
+        self.mox.StubOutWithMock(utils, 'utcnow')
+
+        # Up (equal)
+        utils.utcnow().AndReturn(fts_func(fake_now))
+        service = {'updated_at': fts_func(fake_now - down_time),
+                   'created_at': fts_func(fake_now - down_time)}
+        self.mox.ReplayAll()
+        result = utils.service_is_up(service)
+        self.assertTrue(result)
+
+        self.mox.ResetAll()
+        # Up
+        utils.utcnow().AndReturn(fts_func(fake_now))
+        service = {'updated_at': fts_func(fake_now - down_time + 1),
+                   'created_at': fts_func(fake_now - down_time + 1)}
+        self.mox.ReplayAll()
+        result = utils.service_is_up(service)
+        self.assertTrue(result)
+
+        self.mox.ResetAll()
+        # Down
+        utils.utcnow().AndReturn(fts_func(fake_now))
+        service = {'updated_at': fts_func(fake_now - down_time - 1),
+                   'created_at': fts_func(fake_now - down_time - 1)}
+        self.mox.ReplayAll()
+        result = utils.service_is_up(service)
+        self.assertFalse(result)

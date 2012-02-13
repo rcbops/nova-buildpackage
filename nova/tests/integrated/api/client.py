@@ -16,6 +16,7 @@
 
 import json
 import httplib
+import urllib
 import urlparse
 
 from nova import log as logging
@@ -100,7 +101,7 @@ class TestOpenStackClient(object):
 
         relative_url = parsed_url.path
         if parsed_url.query:
-            relative_url = relative_url + parsed_url.query
+            relative_url = relative_url + "?" + parsed_url.query
         LOG.info(_("Doing %(method)s on %(relative_url)s") % locals())
         if body:
             LOG.info(_("Body: %s") % body)
@@ -205,12 +206,24 @@ class TestOpenStackClient(object):
     def get_server(self, server_id):
         return self.api_get('/servers/%s' % server_id)['server']
 
-    def get_servers(self, detail=True):
+    def get_servers(self, detail=True, search_opts=None):
         rel_url = '/servers/detail' if detail else '/servers'
+
+        if search_opts is not None:
+            qparams = {}
+            for opt, val in search_opts.iteritems():
+                qparams[opt] = val
+            if qparams:
+                query_string = "?%s" % urllib.urlencode(qparams)
+                rel_url += query_string
         return self.api_get(rel_url)['servers']
 
     def post_server(self, server):
-        return self.api_post('/servers', server)['server']
+        response = self.api_post('/servers', server)
+        if 'reservation_id' in response:
+            return response
+        else:
+            return response['server']
 
     def put_server(self, server_id, server):
         return self.api_put('/servers/%s' % server_id, server)
@@ -248,17 +261,17 @@ class TestOpenStackClient(object):
         return self.api_delete('/flavors/%s' % flavor_id)
 
     def get_volume(self, volume_id):
-        return self.api_get('/os-volumes/%s' % volume_id)['volume']
+        return self.api_get('/volumes/%s' % volume_id)['volume']
 
     def get_volumes(self, detail=True):
-        rel_url = '/os-volumes/detail' if detail else '/os-volumes'
+        rel_url = '/volumes/detail' if detail else '/volumes'
         return self.api_get(rel_url)['volumes']
 
     def post_volume(self, volume):
-        return self.api_post('/os-volumes', volume)['volume']
+        return self.api_post('/volumes', volume)['volume']
 
     def delete_volume(self, volume_id):
-        return self.api_delete('/os-volumes/%s' % volume_id)
+        return self.api_delete('/volumes/%s' % volume_id)
 
     def get_server_volume(self, server_id, attachment_id):
         return self.api_get('/servers/%s/os-volume_attachments/%s' %

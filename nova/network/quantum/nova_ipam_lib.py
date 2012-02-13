@@ -23,8 +23,6 @@ from nova import flags
 from nova import ipv6
 from nova import log as logging
 from nova.network import manager
-from nova.network.quantum import melange_connection as melange
-from nova import utils
 
 
 LOG = logging.getLogger("nova.network.quantum.nova_ipam_lib")
@@ -51,7 +49,7 @@ class QuantumNovaIPAMLib(object):
 
     def create_subnet(self, context, label, tenant_id,
                       quantum_net_id, priority, cidr=None,
-                      gateway_v6=None, cidr_v6=None,
+                      gateway=None, gateway_v6=None, cidr_v6=None,
                       dns1=None, dns2=None):
         """Re-use the basic FlatManager create_networks method to
            initialize the networks and fixed_ips tables in Nova DB.
@@ -63,7 +61,7 @@ class QuantumNovaIPAMLib(object):
         subnet_size = len(netaddr.IPNetwork(cidr))
         networks = manager.FlatManager.create_networks(self.net_manager,
                     admin_context, label, cidr,
-                    False, 1, subnet_size, cidr_v6,
+                    False, 1, subnet_size, cidr_v6, gateway,
                     gateway_v6, quantum_net_id, None, dns1, dns2)
 
         if len(networks) != 1:
@@ -81,7 +79,7 @@ class QuantumNovaIPAMLib(object):
         network = db.network_get_by_cidr(admin_context, cidr)
         if not network:
             raise Exception(_("No network with fixed_range = %s" %
-                              fixed_range))
+                              cidr))
         return network['uuid']
 
     def delete_subnets_by_net_id(self, context, net_id, project_id):
@@ -93,8 +91,20 @@ class QuantumNovaIPAMLib(object):
         if not network:
             raise Exception(_("No network with net_id = %s" % net_id))
         manager.FlatManager.delete_network(self.net_manager,
-                                           admin_context, network['cidr'],
+                                           admin_context, None,
+                                           network['uuid'],
                                            require_disassociated=False)
+
+    def get_global_networks(self, admin_context):
+        return db.project_get_networks(admin_context, None, False)
+
+    def get_project_networks(self, admin_context):
+        try:
+            nets = db.network_get_all(admin_context.elevated())
+        except exception.NoNetworksFound:
+            return []
+        # only return networks with a project_id set
+        return [net for net in nets if net['project_id']]
 
     def get_project_and_global_net_ids(self, context, project_id):
         """Fetches all networks associated with this project, or
@@ -103,7 +113,7 @@ class QuantumNovaIPAMLib(object):
         """
         admin_context = context.elevated()
         networks = db.project_get_networks(admin_context, project_id, False)
-        networks.extend(db.project_get_networks(admin_context, None, False))
+        networks.extend(self.get_global_networks(admin_context))
         id_priority_map = {}
         net_list = []
         for n in networks:
@@ -116,6 +126,7 @@ class QuantumNovaIPAMLib(object):
         """Allocates a single fixed IPv4 address for a virtual interface."""
         admin_context = context.elevated()
         network = db.network_get_by_uuid(admin_context, quantum_net_id)
+        address = None
         if network['cidr']:
             address = db.fixed_ip_associate_pool(admin_context,
                                                  network['id'],
@@ -123,8 +134,15 @@ class QuantumNovaIPAMLib(object):
             values = {'allocated': True,
                       'virtual_interface_id': vif_rec['id']}
             db.fixed_ip_update(admin_context, address, values)
+        return address
 
-    def get_subnets_by_net_id(self, context, tenant_id, net_id):
+    def get_tenant_id_by_net_id(self, context, net_id, vif_id, project_id):
+        """Returns tenant_id for this network.  This is only necessary
+           in the melange IPAM case.
+        """
+        return project_id
+
+    def get_subnets_by_net_id(self, context, tenant_id, net_id, _vif_id=None):
         """Returns information about the IPv4 and IPv6 subnets
            associated with a Quantum Network UUID.
         """
@@ -152,7 +170,7 @@ class QuantumNovaIPAMLib(object):
            the specified virtual interface, based on the fixed_ips table.
         """
         vif_rec = db.virtual_interface_get_by_uuid(context, vif_id)
-        fixed_ips = db.fixed_ip_get_by_virtual_interface(context,
+        fixed_ips = db.fixed_ips_by_virtual_interface(context,
                                                          vif_rec['id'])
         return [fixed_ip['address'] for fixed_ip in fixed_ips]
 
@@ -176,20 +194,37 @@ class QuantumNovaIPAMLib(object):
            such subnet exists.
         """
         admin_context = context.elevated()
-        db.network_get_by_uuid(admin_context, quantum_net_id)
+        net = db.network_get_by_uuid(admin_context, quantum_net_id)
+        return net is not None
 
     def deallocate_ips_by_vif(self, context, tenant_id, net_id, vif_ref):
         """Deallocate all fixed IPs associated with the specified
            virtual interface.
         """
-        try:
-            admin_context = context.elevated()
-            fixed_ips = db.fixed_ip_get_by_virtual_interface(admin_context,
-                                                             vif_ref['id'])
-            for fixed_ip in fixed_ips:
-                db.fixed_ip_update(admin_context, fixed_ip['address'],
-                                   {'allocated': False,
-                                    'virtual_interface_id': None})
-        except exception.FixedIpNotFoundForInstance:
+        admin_context = context.elevated()
+        fixed_ips = db.fixed_ips_by_virtual_interface(admin_context,
+                                                         vif_ref['id'])
+        for fixed_ip in fixed_ips:
+            db.fixed_ip_update(admin_context, fixed_ip['address'],
+                               {'allocated': False,
+                                'virtual_interface_id': None})
+        if len(fixed_ips) == 0:
             LOG.error(_('No fixed IPs to deallocate for vif %s' %
-                            vif_ref['id']))
+                        vif_ref['id']))
+
+    def get_allocated_ips(self, context, subnet_id, project_id):
+        """Returns a list of (ip, vif_id) pairs"""
+        admin_context = context.elevated()
+        ips = db.fixed_ip_get_all(admin_context)
+        allocated_ips = []
+        # Get all allocated IPs that are part of this subnet
+        network = db.network_get_by_uuid(admin_context, subnet_id)
+        for ip in ips:
+            # Skip unallocated IPs
+            if not ip['allocated'] == 1:
+                continue
+            if ip['network_id'] == network['id']:
+                vif = db.virtual_interface_get(admin_context,
+                    ip['virtual_interface_id'])
+                allocated_ips.append((ip['address'], vif['uuid']))
+        return allocated_ips
