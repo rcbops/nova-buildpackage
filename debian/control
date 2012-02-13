@@ -39,7 +39,6 @@ Build-Depends-Indep: python-support,
  python-lxml,
  python-unittest2,
  python-feedparser,
- python-tempo,
  pep8
 Build-Conflicts: python-cjson
 Standards-Version: 3.9.1
