@@ -1,5 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
+# Copyright (c) 2011 X.commerce, a business unit of eBay Inc.
 # Copyright 2010 United States Government as represented by the
 # Administrator of the National Aeronautics and Space Administration.
 # All Rights Reserved.
@@ -16,13 +17,12 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-"""Handles all requests relating to instances (guest vms)."""
-
+from nova.db import base
 from nova import exception
 from nova import flags
 from nova import log as logging
 from nova import rpc
-from nova.db import base
+from nova.rpc import common as rpc_common
 
 
 FLAGS = flags.FLAGS
@@ -32,25 +32,72 @@ LOG = logging.getLogger('nova.network')
 class API(base.Base):
     """API for interacting with the network manager."""
 
+    def get_all(self, context):
+        return rpc.call(context,
+                        FLAGS.network_topic,
+                        {'method': 'get_all_networks'})
+
+    def get(self, context, fixed_range, network_uuid):
+        return rpc.call(context,
+                        FLAGS.network_topic,
+                        {'method': 'get_network',
+                         'args': {'network_uuid': network_uuid}})
+
+    def delete(self, context, network_uuid):
+        return rpc.call(context,
+                        FLAGS.network_topic,
+                        {'method': 'delete_network',
+                         'args': {'fixed_range': None,
+                                  'uuid': network_uuid}})
+
+    def disassociate(self, context, network_uuid):
+        return rpc.call(context,
+                        FLAGS.network_topic,
+                        {'method': 'disassociate_network',
+                         'args': {'network_uuid': network_uuid}})
+
+    def get_fixed_ip(self, context, id):
+        return rpc.call(context,
+                        FLAGS.network_topic,
+                        {'method': 'get_fixed_ip',
+                         'args': {'id': id}})
+
     def get_floating_ip(self, context, id):
-        rv = self.db.floating_ip_get(context, id)
-        return dict(rv.iteritems())
+        return rpc.call(context,
+                        FLAGS.network_topic,
+                        {'method': 'get_floating_ip',
+                         'args': {'id': id}})
 
-    def get_floating_ip_by_ip(self, context, address):
-        res = self.db.floating_ip_get_by_address(context, address)
-        return dict(res.iteritems())
+    def get_floating_ip_pools(self, context):
+        return rpc.call(context,
+                        FLAGS.network_topic,
+                        {'method': 'get_floating_pools'})
 
-    def list_floating_ips(self, context):
-        ips = self.db.floating_ip_get_all_by_project(context,
-                                                     context.project_id)
-        return ips
+    def get_floating_ip_by_address(self, context, address):
+        return rpc.call(context,
+                        FLAGS.network_topic,
+                        {'method': 'get_floating_ip_by_address',
+                         'args': {'address': address}})
+
+    def get_floating_ips_by_project(self, context):
+        return rpc.call(context,
+                        FLAGS.network_topic,
+                        {'method': 'get_floating_ips_by_project'})
+
+    def get_floating_ips_by_fixed_address(self, context, fixed_address):
+        return rpc.call(context,
+                        FLAGS.network_topic,
+                        {'method': 'get_floating_ips_by_fixed_address',
+                         'args': {'fixed_address': fixed_address}})
 
     def get_vifs_by_instance(self, context, instance_id):
-        vifs = self.db.virtual_interface_get_by_instance(context, instance_id)
-        return vifs
+        return rpc.call(context,
+                        FLAGS.network_topic,
+                        {'method': 'get_vifs_by_instance',
+                         'args': {'instance_id': instance_id}})
 
-    def allocate_floating_ip(self, context):
-        """Adds a floating ip to a project."""
+    def allocate_floating_ip(self, context, pool=None):
+        """Adds a floating ip to a project from a pool. (allocates)"""
         # NOTE(vish): We don't know which network host should get the ip
         #             when we allocate, so just send it to any one.  This
         #             will probably need to move into a network supervisor
@@ -58,93 +105,38 @@ class API(base.Base):
         return rpc.call(context,
                         FLAGS.network_topic,
                         {'method': 'allocate_floating_ip',
-                         'args': {'project_id': context.project_id}})
+                         'args': {'project_id': context.project_id,
+                                  'pool': pool}})
 
     def release_floating_ip(self, context, address,
                             affect_auto_assigned=False):
-        """Removes floating ip with address from a project."""
-        floating_ip = self.db.floating_ip_get_by_address(context, address)
-        if floating_ip['fixed_ip']:
-            raise exception.ApiError(_('Floating ip is in use.  '
-                             'Disassociate it before releasing.'))
-        if not affect_auto_assigned and floating_ip.get('auto_assigned'):
-            return
-        # NOTE(vish): We don't know which network host should get the ip
-        #             when we deallocate, so just send it to any one.  This
-        #             will probably need to move into a network supervisor
-        #             at some point.
+        """Removes floating ip with address from a project. (deallocates)"""
         rpc.cast(context,
                  FLAGS.network_topic,
                  {'method': 'deallocate_floating_ip',
-                  'args': {'floating_address': floating_ip['address']}})
+                  'args': {'address': address,
+                           'affect_auto_assigned': affect_auto_assigned}})
 
-    def associate_floating_ip(self, context, floating_ip, fixed_ip,
-                                       affect_auto_assigned=False):
+    def associate_floating_ip(self, context, floating_address, fixed_address,
+                                                 affect_auto_assigned=False):
         """Associates a floating ip with a fixed ip.
 
         ensures floating ip is allocated to the project in context
-
-        :param fixed_ip: is either fixed_ip object or a string fixed ip address
-        :param floating_ip: is a string floating ip address
         """
-        # NOTE(tr3buchet): i don't like the "either or" argument type
-        # funcationility but i've left it alone for now
-        # TODO(tr3buchet): this function needs to be rewritten to move
-        # the network related db lookups into the network host code
-        if isinstance(fixed_ip, basestring):
-            fixed_ip = self.db.fixed_ip_get_by_address(context, fixed_ip)
-        floating_ip = self.db.floating_ip_get_by_address(context, floating_ip)
-        if not affect_auto_assigned and floating_ip.get('auto_assigned'):
-            return
-        # Check if the floating ip address is allocated
-        if floating_ip['project_id'] is None:
-            raise exception.ApiError(_('Address (%s) is not allocated') %
-                                       floating_ip['address'])
-        # Check if the floating ip address is allocated to the same project
-        if floating_ip['project_id'] != context.project_id:
-            LOG.warn(_('Address (%(address)s) is not allocated to your '
-                       'project (%(project)s)'),
-                       {'address': floating_ip['address'],
-                       'project': context.project_id})
-            raise exception.ApiError(_('Address (%(address)s) is not '
-                                       'allocated to your project'
-                                       '(%(project)s)') %
-                                        {'address': floating_ip['address'],
-                                        'project': context.project_id})
-
-        # If this address has been previously associated to a
-        # different instance, disassociate the floating_ip
-        if floating_ip['fixed_ip'] and floating_ip['fixed_ip'] is not fixed_ip:
-            self.disassociate_floating_ip(context, floating_ip['address'])
-
-        # NOTE(vish): if we are multi_host, send to the instances host
-        if fixed_ip['network']['multi_host']:
-            host = fixed_ip['instance']['host']
-        else:
-            host = fixed_ip['network']['host']
-        rpc.cast(context,
-                 self.db.queue_get_for(context, FLAGS.network_topic, host),
+        rpc.call(context,
+                 FLAGS.network_topic,
                  {'method': 'associate_floating_ip',
-                  'args': {'floating_address': floating_ip['address'],
-                           'fixed_address': fixed_ip['address']}})
+                  'args': {'floating_address': floating_address,
+                           'fixed_address': fixed_address,
+                           'affect_auto_assigned': affect_auto_assigned}})
 
     def disassociate_floating_ip(self, context, address,
                                  affect_auto_assigned=False):
         """Disassociates a floating ip from fixed ip it is associated with."""
-        floating_ip = self.db.floating_ip_get_by_address(context, address)
-        if not affect_auto_assigned and floating_ip.get('auto_assigned'):
-            return
-        if not floating_ip.get('fixed_ip'):
-            raise exception.ApiError('Address is not associated.')
-        # NOTE(vish): if we are multi_host, send to the instances host
-        if floating_ip['fixed_ip']['network']['multi_host']:
-            host = floating_ip['fixed_ip']['instance']['host']
-        else:
-            host = floating_ip['fixed_ip']['network']['host']
-        rpc.call(context,
-                 self.db.queue_get_for(context, FLAGS.network_topic, host),
+        rpc.cast(context,
+                 FLAGS.network_topic,
                  {'method': 'disassociate_floating_ip',
-                  'args': {'floating_address': floating_ip['address']}})
+                  'args': {'address': address}})
 
     def allocate_for_instance(self, context, instance, **kwargs):
         """Allocates all network structures for an instance.
@@ -153,6 +145,7 @@ class API(base.Base):
         """
         args = kwargs
         args['instance_id'] = instance['id']
+        args['instance_uuid'] = instance['uuid']
         args['project_id'] = instance['project_id']
         args['host'] = instance['host']
         args['instance_type_id'] = instance['instance_type_id']
@@ -196,11 +189,28 @@ class API(base.Base):
     def get_instance_nw_info(self, context, instance):
         """Returns all network info related to an instance."""
         args = {'instance_id': instance['id'],
+                'instance_uuid': instance['uuid'],
                 'instance_type_id': instance['instance_type_id'],
                 'host': instance['host']}
-        return rpc.call(context, FLAGS.network_topic,
-                        {'method': 'get_instance_nw_info',
-                         'args': args})
+        try:
+            return rpc.call(context, FLAGS.network_topic,
+                    {'method': 'get_instance_nw_info',
+                    'args': args})
+        # FIXME(comstud) rpc calls raise RemoteError if the remote raises
+        # an exception.  In the case here, because of a race condition,
+        # it's possible the remote will raise a InstanceNotFound when
+        # someone deletes the instance while this call is in progress.
+        #
+        # Unfortunately, we don't have access to the original exception
+        # class now.. but we do have the exception class's name.  So,
+        # we're checking it here and raising a new exception.
+        #
+        # Ultimately we need RPC to be able to serialize more things like
+        # classes.
+        except rpc_common.RemoteError as err:
+            if err.exc_type == 'InstanceNotFound':
+                raise exception.InstanceNotFound(instance_id=instance['id'])
+            raise
 
     def validate_networks(self, context, requested_networks):
         """validate the networks passed at the time of creating
@@ -209,4 +219,82 @@ class API(base.Base):
         args = {'networks': requested_networks}
         return rpc.call(context, FLAGS.network_topic,
                         {'method': 'validate_networks',
+                         'args': args})
+
+    def get_instance_uuids_by_ip_filter(self, context, filters):
+        """Returns a list of dicts in the form of
+        {'instance_uuid': uuid, 'ip': ip} that matched the ip_filter
+        """
+        args = {'filters': filters}
+        return rpc.call(context, FLAGS.network_topic,
+                        {'method': 'get_instance_uuids_by_ip_filter',
+                         'args': args})
+
+    def get_dns_domains(self, context):
+        """Returns a list of available dns domains.
+        These can be used to create DNS entries for floating ips.
+        """
+        return rpc.call(context,
+                        FLAGS.network_topic,
+                        {'method': 'get_dns_domains'})
+
+    def add_dns_entry(self, context, address, name, dns_type, domain):
+        """Create specified DNS entry for address"""
+        args = {'address': address,
+                'name': name,
+                'dns_type': dns_type,
+                'domain': domain}
+        return rpc.call(context, FLAGS.network_topic,
+                        {'method': 'add_dns_entry',
+                         'args': args})
+
+    def modify_dns_entry(self, context, name, address, domain):
+        """Create specified DNS entry for address"""
+        args = {'address': address,
+                'name': name,
+                'domain': domain}
+        return rpc.call(context, FLAGS.network_topic,
+                        {'method': 'modify_dns_entry',
+                         'args': args})
+
+    def delete_dns_entry(self, context, name, domain):
+        """Delete the specified dns entry."""
+        args = {'name': name, 'domain': domain}
+        return rpc.call(context, FLAGS.network_topic,
+                        {'method': 'delete_dns_entry',
+                         'args': args})
+
+    def delete_dns_domain(self, context, domain):
+        """Delete the specified dns domain."""
+        args = {'domain': domain}
+        return rpc.call(context, FLAGS.network_topic,
+                        {'method': 'delete_dns_domain',
+                         'args': args})
+
+    def get_dns_entries_by_address(self, context, address, domain):
+        """Get entries for address and domain"""
+        args = {'address': address, 'domain': domain}
+        return rpc.call(context, FLAGS.network_topic,
+                        {'method': 'get_dns_entries_by_address',
+                         'args': args})
+
+    def get_dns_entries_by_name(self, context, name, domain):
+        """Get entries for name and domain"""
+        args = {'name': name, 'domain': domain}
+        return rpc.call(context, FLAGS.network_topic,
+                        {'method': 'get_dns_entries_by_name',
+                         'args': args})
+
+    def create_private_dns_domain(self, context, domain, availability_zone):
+        """Create a private DNS domain with nova availability zone."""
+        args = {'domain': domain, 'av_zone': availability_zone}
+        return rpc.call(context, FLAGS.network_topic,
+                        {'method': 'create_private_dns_domain',
+                         'args': args})
+
+    def create_public_dns_domain(self, context, domain, project=None):
+        """Create a private DNS domain with optional nova project."""
+        args = {'domain': domain, 'project': project}
+        return rpc.call(context, FLAGS.network_topic,
+                        {'method': 'create_public_dns_domain',
                          'args': args})

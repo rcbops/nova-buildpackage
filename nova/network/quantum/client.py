@@ -21,6 +21,8 @@ import json
 import socket
 import urllib
 
+from nova import utils
+
 
 # FIXME(danwent): All content in this file should be removed once the
 # packaging work for the quantum client libraries is complete.
@@ -37,7 +39,7 @@ class JSONSerializer(object):
             return json.dumps(data)
         except TypeError:
             pass
-        return json.dumps(to_primitive(data))
+        return json.dumps(utils.to_primitive(data))
 
     def deserialize(self, data, content_type):
         return json.loads(data)
@@ -153,7 +155,7 @@ class Client(object):
         action = Client.action_prefix + action
         action = action.replace('{tenant_id}', self.tenant)
 
-        if type(params) is dict:
+        if isinstance(params, dict):
             action += '?' + urllib.urlencode(params)
 
         try:
@@ -163,7 +165,7 @@ class Client(object):
 
             # Open connection and send request, handling SSL certs
             certs = {'key_file': self.key_file, 'cert_file': self.cert_file}
-            certs = dict((x, certs[x]) for x in certs if certs[x] != None)
+            certs = dict((x, certs[x]) for x in certs if certs[x] is not None)
 
             if self.use_ssl and len(certs):
                 c = connection_type(self.host, self.port, **certs)
@@ -217,15 +219,13 @@ class Client(object):
     def serialize(self, data):
         if not data:
             return None
-        elif type(data) is dict:
+        elif isinstance(data, dict):
             return JSONSerializer().serialize(data, self.content_type())
         else:
             raise Exception(_("unable to deserialize object of type = '%s'" %
                               type(data)))
 
     def deserialize(self, data, status_code):
-        if status_code == 202:
-            return data
         return JSONSerializer().deserialize(data, self.content_type())
 
     def content_type(self, format=None):

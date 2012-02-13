@@ -72,7 +72,7 @@ LOG = logging.getLogger("nova.ldapdriver")
 if FLAGS.memcached_servers:
     import memcache
 else:
-    from nova import fakememcache as memcache
+    from nova.testing.fake import memcache
 
 
 # TODO(vish): make an abstract base class with the same public methods
@@ -85,7 +85,7 @@ def _clean(attr):
     """Clean attr for insertion into ldap"""
     if attr is None:
         return None
-    if type(attr) is unicode:
+    if isinstance(attr, unicode):
         return str(attr)
     return attr
 

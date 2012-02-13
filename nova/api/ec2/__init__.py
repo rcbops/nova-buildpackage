@@ -20,23 +20,24 @@ Starting point for routing EC2 requests.
 
 """
 
-from urlparse import urlparse
+import urlparse
 
-import eventlet
 from eventlet.green import httplib
 import webob
 import webob.dec
 import webob.exc
 
+from nova.api.ec2 import apirequest
+from nova.api.ec2 import ec2utils
+from nova.api.ec2 import faults
+from nova.api import validator
+from nova.auth import manager
 from nova import context
 from nova import exception
 from nova import flags
 from nova import log as logging
 from nova import utils
 from nova import wsgi
-from nova.api.ec2 import apirequest
-from nova.api.ec2 import ec2utils
-from nova.auth import manager
 
 FLAGS = flags.FLAGS
 LOG = logging.getLogger("nova.api")
@@ -46,7 +47,23 @@ flags.DEFINE_integer('lockout_minutes', 15,
                      'Number of minutes to lockout if triggered.')
 flags.DEFINE_integer('lockout_window', 15,
                      'Number of minutes for lockout window.')
+flags.DEFINE_string('keystone_ec2_url',
+                    'http://localhost:5000/v2.0/ec2tokens',
+                    'URL to get token from ec2 request.')
 flags.DECLARE('use_forwarded_for', 'nova.api.auth')
+
+
+## Fault Wrapper around all EC2 requests ##
+class FaultWrapper(wsgi.Middleware):
+    """Calls the middleware stack, captures any exceptions into faults."""
+
+    @webob.dec.wsgify(RequestClass=wsgi.Request)
+    def __call__(self, req):
+        try:
+            return req.get_response(self.application)
+        except Exception as ex:
+            LOG.exception(_("FaultWrapper: %s"), unicode(ex))
+            return faults.Fault(webob.exc.HTTPInternalServerError())
 
 
 class RequestLogging(wsgi.Middleware):
@@ -95,7 +112,7 @@ class Lockout(wsgi.Middleware):
     z = lockout_attempts flag
 
     Uses memcached if lockout_memcached_servers flag is set, otherwise it
-    uses a very simple in-proccess cache. Due to the simplicity of
+    uses a very simple in-process cache. Due to the simplicity of
     the implementation, the timeout window is started with the first
     failed request, so it will block if there are x failed logins within
     that period.
@@ -109,7 +126,7 @@ class Lockout(wsgi.Middleware):
         if FLAGS.memcached_servers:
             import memcache
         else:
-            from nova import fakememcache as memcache
+            from nova.testing.fake import memcache
         self.mc = memcache.Client(FLAGS.memcached_servers,
                                   debug=0)
         super(Lockout, self).__init__(application)
@@ -137,6 +154,63 @@ class Lockout(wsgi.Middleware):
                 self.mc.set(failures_key, str(failures),
                             time=FLAGS.lockout_minutes * 60)
         return res
+
+
+class EC2Token(wsgi.Middleware):
+    """Authenticate an EC2 request with keystone and convert to token."""
+
+    @webob.dec.wsgify(RequestClass=wsgi.Request)
+    def __call__(self, req):
+        # Read request signature and access id.
+        try:
+            signature = req.params['Signature']
+            access = req.params['AWSAccessKeyId']
+        except KeyError, e:
+            LOG.exception(e)
+            raise webob.exc.HTTPBadRequest()
+
+        # Make a copy of args for authentication and signature verification.
+        auth_params = dict(req.params)
+        # Not part of authentication args
+        auth_params.pop('Signature')
+
+        # Authenticate the request.
+        creds = {'ec2Credentials': {'access': access,
+                                    'signature': signature,
+                                    'host': req.host,
+                                    'verb': req.method,
+                                    'path': req.path,
+                                    'params': auth_params,
+                                   }}
+        creds_json = utils.dumps(creds)
+        headers = {'Content-Type': 'application/json'}
+
+        # Disable "has no x member" pylint error
+        # for httplib and urlparse
+        # pylint: disable-msg=E1101
+        o = urlparse.urlparse(FLAGS.keystone_ec2_url)
+        if o.scheme == "http":
+            conn = httplib.HTTPConnection(o.netloc)
+        else:
+            conn = httplib.HTTPSConnection(o.netloc)
+        conn.request('POST', o.path, body=creds_json, headers=headers)
+        response = conn.getresponse().read()
+        conn.close()
+
+        # NOTE(vish): We could save a call to keystone by
+        #             having keystone return token, tenant,
+        #             user, and roles from this call.
+
+        result = utils.loads(response)
+        try:
+            token_id = result['access']['token']['id']
+        except (AttributeError, KeyError), e:
+            LOG.exception(e)
+            raise webob.exc.HTTPBadRequest()
+
+        # Authenticated!
+        req.headers['X-Auth-Token'] = token_id
+        return self.application
 
 
 class NoAuth(wsgi.Middleware):
@@ -245,7 +319,6 @@ class Requestify(wsgi.Middleware):
         api_request = apirequest.APIRequest(self.controller, action,
                                             req.params['Version'], args)
         req.environ['ec2.request'] = api_request
-        req.environ['ec2.action_args'] = args
         return self.application
 
 
@@ -268,7 +341,7 @@ class Authorizer(wsgi.Middleware):
                 'CreateKeyPair': ['all'],
                 'DeleteKeyPair': ['all'],
                 'DescribeSecurityGroups': ['all'],
-                'ImportPublicKey': ['all'],
+                'ImportKeyPair': ['all'],
                 'AuthorizeSecurityGroupIngress': ['netadmin'],
                 'RevokeSecurityGroupIngress': ['netadmin'],
                 'CreateSecurityGroup': ['netadmin'],
@@ -328,6 +401,45 @@ class Authorizer(wsgi.Middleware):
         if 'none' in roles:
             return False
         return any(role in context.roles for role in roles)
+
+
+class Validator(wsgi.Middleware):
+
+    def validate_ec2_id(val):
+        if not validator.validate_str()(val):
+            return False
+        try:
+            ec2utils.ec2_id_to_id(val)
+        except exception.InvalidEc2Id:
+            return False
+        return True
+
+    validator.validate_ec2_id = validate_ec2_id
+
+    validator.DEFAULT_VALIDATOR = {
+        'instance_id': validator.validate_ec2_id,
+        'volume_id': validator.validate_ec2_id,
+        'image_id': validator.validate_ec2_id,
+        'attribute': validator.validate_str(),
+        'image_location': validator.validate_image_path,
+        'public_ip': validator.validate_ipv4,
+        'region_name': validator.validate_str(),
+        'group_name': validator.validate_str(max_length=255),
+        'group_description': validator.validate_str(max_length=255),
+        'size': validator.validate_int(),
+        'user_data': validator.validate_user_data
+    }
+
+    def __init__(self, application):
+        super(Validator, self).__init__(application)
+
+    @webob.dec.wsgify(RequestClass=wsgi.Request)
+    def __call__(self, req):
+        if validator.validate(req.environ['ec2.request'].args,
+                              validator.DEFAULT_VALIDATOR):
+            return self.application
+        else:
+            raise webob.exc.HTTPBadRequest()
 
 
 class Executor(wsgi.Application):
@@ -391,6 +503,10 @@ class Executor(wsgi.Application):
             LOG.info(_('NotAuthorized raised: %s'), unicode(ex),
                     context=context)
             return self._error(req, context, type(ex).__name__, unicode(ex))
+        except exception.InvalidRequest as ex:
+            LOG.debug(_('InvalidRequest raised: %s'), unicode(ex),
+                     context=context)
+            return self._error(req, context, type(ex).__name__, unicode(ex))
         except Exception as ex:
             extra = {'environment': req.environ}
             LOG.exception(_('Unexpected error raised: %s'), unicode(ex),
@@ -408,7 +524,7 @@ class Executor(wsgi.Application):
             return resp
 
     def _error(self, req, context, code, message):
-        LOG.error("%s: %s", code, message, context=context)
+        LOG.error(_('%(code)s: %(message)s') % locals())
         resp = webob.Response()
         resp.status = 400
         resp.headers['Content-Type'] = 'text/xml'
@@ -419,23 +535,3 @@ class Executor(wsgi.Application):
                          (utils.utf8(code), utils.utf8(message),
                          utils.utf8(context.request_id)))
         return resp
-
-
-class Versions(wsgi.Application):
-
-    @webob.dec.wsgify(RequestClass=wsgi.Request)
-    def __call__(self, req):
-        """Respond to a request for all EC2 versions."""
-        # available api versions
-        versions = [
-            '1.0',
-            '2007-01-19',
-            '2007-03-01',
-            '2007-08-29',
-            '2007-10-10',
-            '2007-12-15',
-            '2008-02-01',
-            '2008-09-01',
-            '2009-04-04',
-        ]
-        return ''.join('%s\n' % v for v in versions)

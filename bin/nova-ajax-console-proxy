@@ -53,8 +53,6 @@ flags.DEFINE_flag(flags.HelpshortFlag())
 flags.DEFINE_flag(flags.HelpXMLFlag())
 
 LOG = logging.getLogger('nova.ajax_console_proxy')
-LOG.setLevel(logging.DEBUG)
-LOG.addHandler(logging.StreamHandler())
 
 
 class AjaxConsoleProxy(object):
@@ -102,7 +100,8 @@ class AjaxConsoleProxy(object):
                           % (req_url, str(env)))
             start_response("401 NOT AUTHORIZED", [])
             return "Not Authorized"
-        except Exception:
+        except Exception, exc:
+            LOG.exception(exc)
             start_response("500 ERROR", [])
             return "Server Error"
 
@@ -141,4 +140,4 @@ if __name__ == '__main__':
     server = wsgi.Server("AJAX Console Proxy", acp, port=acp_port)
     service.serve(server)
     service.wait()
-    self.conn.close()
+    acp.conn.close()

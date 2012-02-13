@@ -1,4 +1,4 @@
-# Copyright (c) 2011 Openstack, LLC.
+# Copyright (c) 2011-2012 Openstack, LLC.
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -14,19 +14,11 @@
 #    under the License.
 
 
-import nova.scheduler
-from nova.scheduler.filters import abstract_filter
+import abstract_filter
 
 
 class AllHostsFilter(abstract_filter.AbstractHostFilter):
-    """NOP host filter. Returns all hosts in ZoneManager."""
-    def instance_type_to_filter(self, instance_type):
-        """Return anything to prevent base-class from raising
-        exception.
-        """
-        return (self._full_name(), instance_type)
+    """NOP host filter. Returns all hosts."""
 
-    def filter_hosts(self, zone_manager, query):
-        """Return a list of hosts from ZoneManager list."""
-        return [(host, services)
-               for host, services in zone_manager.service_states.iteritems()]
+    def host_passes(self, host_state, filter_properties):
+        return True

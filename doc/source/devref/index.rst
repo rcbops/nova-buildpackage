@@ -27,6 +27,7 @@ Programming HowTos and Tutorials
     :maxdepth: 3
     
     development.environment
+    unit_tests
     addmethod.openstackapi
 
 
@@ -35,11 +36,21 @@ Background Concepts for Nova
 .. toctree::
    :maxdepth: 3
 
+   threading
+   il8n
    distributed_scheduler
    multinic
    zone
    rabbit
-   
+
+Other Resources
+---------------
+.. toctree::
+   :maxdepth: 3
+
+   launchpad
+   gerrit
+   jenkins
 
 API Reference
 -------------
@@ -56,6 +67,7 @@ Module Reference
    services
    database
    volume
+   xensmvolume
    compute
    network
    auth

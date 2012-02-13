@@ -1,5 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
+# Copyright (c) 2011 X.commerce, a business unit of eBay Inc.
 # Copyright 2010 United States Government as represented by the
 # Administrator of the National Aeronautics and Space Administration.
 # Copyright 2011 Piston Cloud Computing, Inc.
@@ -21,7 +22,7 @@ SQLAlchemy models for nova data.
 """
 
 from sqlalchemy.orm import relationship, backref, object_mapper
-from sqlalchemy import Column, Integer, String, schema
+from sqlalchemy import Column, Integer, BigInteger, String, schema
 from sqlalchemy import ForeignKey, DateTime, Boolean, Text, Float
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.declarative import declarative_base
@@ -29,10 +30,8 @@ from sqlalchemy.schema import ForeignKeyConstraint
 
 from nova.db.sqlalchemy.session import get_session
 
-from nova import auth
 from nova import exception
 from nova import flags
-from nova import ipv6
 from nova import utils
 
 
@@ -137,6 +136,16 @@ class ComputeNode(BASE, NovaBase):
     hypervisor_type = Column(Text)
     hypervisor_version = Column(Integer)
 
+    # Free Ram, amount of activity (resize, migration, boot, etc) and
+    # the number of running VM's are a good starting point for what's
+    # important when making scheduling decisions.
+    #
+    # NOTE(sandy): We'll need to make this extensible for other schedulers.
+    free_ram_mb = Column(Integer)
+    free_disk_gb = Column(Integer)
+    current_workload = Column(Integer)
+    running_vms = Column(Integer)
+
     # Note(masumotok): Expected Strings example:
     #
     # '{"arch":"x86_64",
@@ -148,6 +157,7 @@ class ComputeNode(BASE, NovaBase):
     # above, since it is copied from <cpu> tag of getCapabilities()
     # (See libvirt.virtConnection).
     cpu_info = Column(Text, nullable=True)
+    disk_available_least = Column(Integer)
 
 
 class Certificate(BASE, NovaBase):
@@ -169,7 +179,21 @@ class Instance(BASE, NovaBase):
 
     @property
     def name(self):
-        base_name = FLAGS.instance_name_template % self.id
+        try:
+            base_name = FLAGS.instance_name_template % self.id
+        except TypeError:
+            # Support templates like "uuid-%(uuid)s", etc.
+            info = {}
+            for key, value in self.iteritems():
+                # prevent recursion if someone specifies %(name)s
+                # %(name)s will not be valid.
+                if key == 'name':
+                    continue
+                info[key] = value
+            try:
+                base_name = FLAGS.instance_name_template % info
+            except KeyError:
+                base_name = self.uuid
         if getattr(self, '_rescue', False):
             base_name += "-rescue"
         return base_name
@@ -199,7 +223,8 @@ class Instance(BASE, NovaBase):
 
     memory_mb = Column(Integer)
     vcpus = Column(Integer)
-    local_gb = Column(Integer)
+    root_gb = Column(Integer)
+    ephemeral_gb = Column(Integer)
 
     hostname = Column(String(255))
     host = Column(String(255))  # , ForeignKey('hosts.id'))
@@ -232,7 +257,7 @@ class Instance(BASE, NovaBase):
     uuid = Column(String(36))
 
     root_device_name = Column(String(255))
-    default_local_device = Column(String(255), nullable=True)
+    default_ephemeral_device = Column(String(255), nullable=True)
     default_swap_device = Column(String(255), nullable=True)
     config_drive = Column(String(255))
 
@@ -240,6 +265,37 @@ class Instance(BASE, NovaBase):
     # to connect to the instance
     access_ip_v4 = Column(String(255))
     access_ip_v6 = Column(String(255))
+
+    auto_disk_config = Column(Boolean())
+    progress = Column(Integer)
+
+    # EC2 instance_initiated_shutdown_teminate
+    # True: -> 'terminate'
+    # False: -> 'stop'
+    shutdown_terminate = Column(Boolean(), default=True, nullable=False)
+
+    # EC2 disable_api_termination
+    disable_terminate = Column(Boolean(), default=False, nullable=False)
+
+
+class InstanceInfoCache(BASE, NovaBase):
+    """
+    Represents a cache of information about an instance
+    """
+    __tablename__ = 'instance_info_caches'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # text column used for storing a json object of network data for api
+    network_info = Column(Text)
+
+    instance_id = Column(String(36), ForeignKey('instances.uuid'),
+                                     nullable=False, unique=True)
+    instance = relationship(Instance,
+                            backref=backref('info_cache', uselist=False),
+                            foreign_keys=instance_id,
+                            primaryjoin='and_('
+                              'InstanceInfoCache.instance_id == Instance.uuid,'
+                              'InstanceInfoCache.deleted == False)')
 
 
 class VirtualStorageArray(BASE, NovaBase):
@@ -272,8 +328,7 @@ class InstanceActions(BASE, NovaBase):
     """Represents a guest VM's actions and results"""
     __tablename__ = "instance_actions"
     id = Column(Integer, primary_key=True)
-    instance_id = Column(Integer, ForeignKey('instances.id'))
-
+    instance_uuid = Column(String(36), ForeignKey('instances.uuid'))
     action = Column(String(255))
     error = Column(Text)
 
@@ -285,11 +340,12 @@ class InstanceTypes(BASE, NovaBase):
     name = Column(String(255), unique=True)
     memory_mb = Column(Integer)
     vcpus = Column(Integer)
-    local_gb = Column(Integer)
-    flavorid = Column(Integer, unique=True)
+    root_gb = Column(Integer)
+    ephemeral_gb = Column(Integer)
+    flavorid = Column(String(255), unique=True)
     swap = Column(Integer, nullable=False, default=0)
-    rxtx_quota = Column(Integer, nullable=False, default=0)
-    rxtx_cap = Column(Integer, nullable=False, default=0)
+    rxtx_factor = Column(Float, nullable=False, default=1)
+    vcpu_weight = Column(Integer, nullable=True)
 
     instances = relationship(Instance,
                            backref=backref('instance_type', uselist=False),
@@ -467,21 +523,7 @@ class BlockDeviceMapping(BASE, NovaBase):
     # for no device to suppress devices.
     no_device = Column(Boolean, nullable=True)
 
-
-class ExportDevice(BASE, NovaBase):
-    """Represates a shelf and blade that a volume can be exported on."""
-    __tablename__ = 'export_devices'
-    __table_args__ = (schema.UniqueConstraint("shelf_id", "blade_id"),
-                      {'mysql_engine': 'InnoDB'})
-    id = Column(Integer, primary_key=True)
-    shelf_id = Column(Integer)
-    blade_id = Column(Integer)
-    volume_id = Column(Integer, ForeignKey('volumes.id'), nullable=True)
-    volume = relationship(Volume,
-                          backref=backref('export_device', uselist=False),
-                          foreign_keys=volume_id,
-                          primaryjoin='and_(ExportDevice.volume_id==Volume.id,'
-                                           'ExportDevice.deleted==False)')
+    connection_info = Column(Text, nullable=True)
 
 
 class IscsiTarget(BASE, NovaBase):
@@ -629,6 +671,8 @@ class Network(BASE, NovaBase):
     vpn_private_address = Column(String(255))
     dhcp_start = Column(String(255))
 
+    rxtx_base = Column(Integer)
+
     project_id = Column(String(255))
     priority = Column(Integer)
     host = Column(String(255))  # , ForeignKey('hosts.id'))
@@ -640,26 +684,9 @@ class VirtualInterface(BASE, NovaBase):
     __tablename__ = 'virtual_interfaces'
     id = Column(Integer, primary_key=True)
     address = Column(String(255), unique=True)
-    network_id = Column(Integer, ForeignKey('networks.id'))
-    network = relationship(Network, backref=backref('virtual_interfaces'))
-
-    # TODO(tr3buchet): cut the cord, removed foreign key and backrefs
-    instance_id = Column(Integer, ForeignKey('instances.id'), nullable=False)
-    instance = relationship(Instance, backref=backref('virtual_interfaces'))
-
+    network_id = Column(Integer, nullable=False)
+    instance_id = Column(Integer, nullable=False)
     uuid = Column(String(36))
-
-    @property
-    def fixed_ipv6(self):
-        cidr_v6 = self.network.cidr_v6
-        if cidr_v6 is None:
-            ipv6_address = None
-        else:
-            project_id = self.instance.project_id
-            mac = self.address
-            ipv6_address = ipv6.to_global(cidr_v6, mac, project_id)
-
-        return ipv6_address
 
 
 # TODO(vish): can these both come from the same baseclass?
@@ -668,19 +695,9 @@ class FixedIp(BASE, NovaBase):
     __tablename__ = 'fixed_ips'
     id = Column(Integer, primary_key=True)
     address = Column(String(255))
-    network_id = Column(Integer, ForeignKey('networks.id'), nullable=True)
-    network = relationship(Network, backref=backref('fixed_ips'))
-    virtual_interface_id = Column(Integer, ForeignKey('virtual_interfaces.id'),
-                                                                 nullable=True)
-    virtual_interface = relationship(VirtualInterface,
-                                     backref=backref('fixed_ips'))
-    instance_id = Column(Integer, ForeignKey('instances.id'), nullable=True)
-    instance = relationship(Instance,
-                            backref=backref('fixed_ips'),
-                            foreign_keys=instance_id,
-                            primaryjoin='and_('
-                                'FixedIp.instance_id == Instance.id,'
-                                'FixedIp.deleted == False)')
+    network_id = Column(Integer, nullable=True)
+    virtual_interface_id = Column(Integer, nullable=True)
+    instance_id = Column(Integer, nullable=True)
     # associated means that a fixed_ip has its instance_id column set
     # allocated means that a fixed_ip has a its virtual_interface_id column set
     allocated = Column(Boolean, default=False)
@@ -695,16 +712,12 @@ class FloatingIp(BASE, NovaBase):
     __tablename__ = 'floating_ips'
     id = Column(Integer, primary_key=True)
     address = Column(String(255))
-    fixed_ip_id = Column(Integer, ForeignKey('fixed_ips.id'), nullable=True)
-    fixed_ip = relationship(FixedIp,
-                            backref=backref('floating_ips'),
-                            foreign_keys=fixed_ip_id,
-                            primaryjoin='and_('
-                                'FloatingIp.fixed_ip_id == FixedIp.id,'
-                                'FloatingIp.deleted == False)')
+    fixed_ip_id = Column(Integer, nullable=True)
     project_id = Column(String(255))
     host = Column(String(255))  # , ForeignKey('hosts.id'))
     auto_assigned = Column(Boolean, default=False, nullable=False)
+    pool = Column(String(255))
+    interface = Column(String(255))
 
 
 class AuthToken(BASE, NovaBase):
@@ -746,6 +759,19 @@ class Project(BASE, NovaBase):
     members = relationship(User,
                            secondary='user_project_association',
                            backref='projects')
+
+
+class DNSDomain(BASE, NovaBase):
+    """Represents a DNS domain with availability zone or project info."""
+    __tablename__ = 'dns_domains'
+    domain = Column(String(512), primary_key=True)
+    scope = Column(String(255))
+    availability_zone = Column(String(255))
+    project_id = Column(String(255))
+    project = relationship(Project,
+                           primaryjoin=project_id == Project.id,
+                           foreign_keys=[Project.id],
+                           uselist=False)
 
 
 class UserProjectRoleAssociation(BASE, NovaBase):
@@ -840,11 +866,48 @@ class Zone(BASE, NovaBase):
     """Represents a child zone of this zone."""
     __tablename__ = 'zones'
     id = Column(Integer, primary_key=True)
+    name = Column(String(255))
     api_url = Column(String(255))
     username = Column(String(255))
     password = Column(String(255))
     weight_offset = Column(Float(), default=0.0)
     weight_scale = Column(Float(), default=1.0)
+
+
+class Aggregate(BASE, NovaBase):
+    """Represents a cluster of hosts that exists in this zone."""
+    __tablename__ = 'aggregates'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(255), unique=True)
+    operational_state = Column(String(255), nullable=False)
+    availability_zone = Column(String(255), nullable=False)
+
+
+class AggregateHost(BASE, NovaBase):
+    """Represents a host that is member of an aggregate."""
+    __tablename__ = 'aggregate_hosts'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    host = Column(String(255), unique=True)
+    aggregate_id = Column(Integer, ForeignKey('aggregates.id'), nullable=False)
+    aggregate = relationship(Aggregate, backref=backref('aggregates'),
+                             foreign_keys=aggregate_id,
+                             primaryjoin='and_('
+                                  'AggregateHost.aggregate_id == Aggregate.id,'
+                                  'AggregateHost.deleted == False)')
+
+
+class AggregateMetadata(BASE, NovaBase):
+    """Represents a metadata key/value pair for an aggregate."""
+    __tablename__ = 'aggregate_metadata'
+    id = Column(Integer, primary_key=True)
+    key = Column(String(255), nullable=False)
+    value = Column(String(255), nullable=False)
+    aggregate_id = Column(Integer, ForeignKey('aggregates.id'), nullable=False)
+    aggregate = relationship(Aggregate, backref="metadata",
+                             foreign_keys=aggregate_id,
+                             primaryjoin='and_('
+                              'AggregateMetadata.aggregate_id == Aggregate.id,'
+                              'AggregateMetadata.deleted == False)')
 
 
 class AgentBuild(BASE, NovaBase):
@@ -859,6 +922,62 @@ class AgentBuild(BASE, NovaBase):
     md5hash = Column(String(255))
 
 
+class BandwidthUsage(BASE, NovaBase):
+    """Cache for instance bandwidth usage data pulled from the hypervisor"""
+    __tablename__ = 'bw_usage_cache'
+    id = Column(Integer, primary_key=True, nullable=False)
+    instance_id = Column(Integer, nullable=False)
+    network_label = Column(String(255))
+    start_period = Column(DateTime, nullable=False)
+    last_refreshed = Column(DateTime)
+    bw_in = Column(BigInteger)
+    bw_out = Column(BigInteger)
+
+
+class S3Image(BASE, NovaBase):
+    """Compatibility layer for the S3 image service talking to Glance"""
+    __tablename__ = 's3_images'
+    id = Column(Integer, primary_key=True, nullable=False, autoincrement=True)
+    uuid = Column(String(36), nullable=False)
+
+
+class SMFlavors(BASE, NovaBase):
+    """Represents a flavor for SM volumes."""
+    __tablename__ = 'sm_flavors'
+    id = Column(Integer(), primary_key=True)
+    label = Column(String(255))
+    description = Column(String(255))
+
+
+class SMBackendConf(BASE, NovaBase):
+    """Represents the connection to the backend for SM."""
+    __tablename__ = 'sm_backend_config'
+    id = Column(Integer(), primary_key=True)
+    flavor_id = Column(Integer, ForeignKey('sm_flavors.id'), nullable=False)
+    sr_uuid = Column(String(255))
+    sr_type = Column(String(255))
+    config_params = Column(String(2047))
+
+
+class SMVolume(BASE, NovaBase):
+    __tablename__ = 'sm_volume'
+    id = Column(Integer(), ForeignKey(Volume.id), primary_key=True)
+    backend_id = Column(Integer, ForeignKey('sm_backend_config.id'),
+                        nullable=False)
+    vdi_uuid = Column(String(255))
+
+
+class InstanceFault(BASE, NovaBase):
+    __tablename__ = 'instance_faults'
+    id = Column(Integer(), primary_key=True, autoincrement=True)
+    instance_uuid = Column(String(36),
+                           ForeignKey('instances.uuid'),
+                           nullable=False)
+    code = Column(Integer(), nullable=False)
+    message = Column(String(255))
+    details = Column(Text)
+
+
 def register_models():
     """Register Models and create metadata.
 
@@ -868,13 +987,14 @@ def register_models():
     """
     from sqlalchemy import create_engine
     models = (Service, Instance, InstanceActions, InstanceTypes,
-              Volume, ExportDevice, IscsiTarget, FixedIp, FloatingIp,
+              Volume, IscsiTarget, FixedIp, FloatingIp,
               Network, SecurityGroup, SecurityGroupIngressRule,
               SecurityGroupInstanceAssociation, AuthToken, User,
               Project, Certificate, ConsolePool, Console, Zone,
               VolumeMetadata, VolumeTypes, VolumeTypeExtraSpecs,
               AgentBuild, InstanceMetadata, InstanceTypeExtraSpecs, Migration,
-              VirtualStorageArray)
+              VirtualStorageArray, SMFlavors, SMBackendConf, SMVolume,
+              InstanceFault)
     engine = create_engine(FLAGS.sql_connection, echo=False)
     for model in models:
         model.metadata.create_all(engine)

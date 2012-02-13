@@ -31,17 +31,14 @@ import unittest
 
 import mox
 import nose.plugins.skip
-import nova.image.fake
-import shutil
 import stubout
-from eventlet import greenthread
 
-from nova import fakerabbit
 from nova import flags
+import nova.image.fake
 from nova import log
-from nova import rpc
 from nova import utils
 from nova import service
+from nova.testing.fake import rabbit
 from nova.virt import fake
 
 
@@ -56,6 +53,7 @@ LOG = log.getLogger('nova.tests')
 
 class skip_test(object):
     """Decorator that skips a test."""
+    # TODO(tr3buchet): remember forever what comstud did here
     def __init__(self, msg):
         self.message = msg
 
@@ -68,7 +66,7 @@ class skip_test(object):
 
 
 class skip_if(object):
-    """Decorator that skips a test if contition is true."""
+    """Decorator that skips a test if condition is true."""
     def __init__(self, condition, msg):
         self.condition = condition
         self.message = msg
@@ -127,7 +125,6 @@ class TestCase(unittest.TestCase):
         # because it screws with our generators
         self.mox = mox.Mox()
         self.stubs = stubout.StubOutForTesting()
-        self.flag_overrides = {}
         self.injected = []
         self._services = []
         self._original_flags = FLAGS.FlagValuesDict()
@@ -143,7 +140,7 @@ class TestCase(unittest.TestCase):
         finally:
             # Clean out fake_rabbit's queue if we used it
             if FLAGS.fake_rabbit:
-                fakerabbit.reset_all()
+                rabbit.reset_all()
 
             if FLAGS.connection_type == 'fake':
                 if hasattr(fake.FakeConnection, '_instance'):
@@ -152,7 +149,7 @@ class TestCase(unittest.TestCase):
             if FLAGS.image_service == 'nova.image.fake.FakeImageService':
                 nova.image.fake.FakeImageService_reset()
 
-            # Reset any overriden flags
+            # Reset any overridden flags
             self.reset_flags()
 
             # Stop any timers
@@ -172,9 +169,6 @@ class TestCase(unittest.TestCase):
     def flags(self, **kw):
         """Override flag variables for a test."""
         for k, v in kw.iteritems():
-            # Store original flag value if it's not been overriden yet
-            if k not in self.flag_overrides:
-                self.flag_overrides[k] = getattr(FLAGS, k)
             setattr(FLAGS, k, v)
 
     def reset_flags(self):

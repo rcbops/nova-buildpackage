@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
+# Copyright (c) 2011 X.commerce, a business unit of eBay Inc.
 # Copyright 2010 United States Government as represented by the
 # Administrator of the National Aeronautics and Space Administration.
 # All Rights Reserved.
@@ -59,7 +60,7 @@ import glob
 import json
 import math
 import netaddr
-from optparse import OptionParser
+import optparse
 import os
 import StringIO
 import sys
@@ -88,6 +89,7 @@ from nova import rpc
 from nova import utils
 from nova import version
 from nova import vsa
+from nova.api.ec2 import admin
 from nova.api.ec2 import ec2utils
 from nova.auth import manager
 from nova.cloudpipe import pipelib
@@ -96,13 +98,14 @@ from nova.db import migration
 from nova.volume import volume_types
 
 FLAGS = flags.FLAGS
-flags.DECLARE('fixed_range', 'nova.network.manager')
+flags.DECLARE('flat_network_bridge', 'nova.network.manager')
 flags.DECLARE('num_networks', 'nova.network.manager')
+flags.DECLARE('multi_host', 'nova.network.manager')
 flags.DECLARE('network_size', 'nova.network.manager')
 flags.DECLARE('vlan_start', 'nova.network.manager')
 flags.DECLARE('vpn_start', 'nova.network.manager')
-flags.DECLARE('fixed_range_v6', 'nova.network.manager')
-flags.DECLARE('gateway_v6', 'nova.network.manager')
+flags.DECLARE('default_floating_pool', 'nova.network.manager')
+flags.DECLARE('public_interface', 'nova.network.linux_net')
 flags.DECLARE('libvirt_type', 'nova.virt.libvirt.connection')
 flags.DEFINE_flag(flags.HelpFlag())
 flags.DEFINE_flag(flags.HelpshortFlag())
@@ -175,8 +178,9 @@ class VpnCommands(object):
     def spawn(self):
         """Run all VPNs."""
         print "WARNING: This method only works with deprecated auth"
+        ctxt = context.get_admin_context()
         for p in reversed(self.manager.get_projects()):
-            if not self._vpn_for(p.id):
+            if self._vpn_for(ctxt, p.id):
                 print 'spawning %s' % p.id
                 self.pipe.launch_vpn_instance(p.id, p.project_manager_id)
                 time.sleep(10)
@@ -211,6 +215,9 @@ class VpnCommands(object):
                               network['id'],
                               {'vpn_public_address': ip,
                                'vpn_public_port': int(port)})
+
+    def _vpn_for(self, context, project_id):
+        return admin.AdminController()._vpn_for(context, project_id)
 
 
 class ShellCommands(object):
@@ -630,24 +637,27 @@ class FixedIpCommands(object):
             print "error: %s" % ex
             sys.exit(2)
 
-        print "%-18s\t%-15s\t%-17s\t%-15s\t%s" % (_('network'),
-                                                  _('IP address'),
-                                                  _('MAC address'),
-                                                  _('hostname'),
-                                                  _('host'))
+        instances = db.instance_get_all(context.get_admin_context())
+        instances_by_id = {}
+        for instance in instances:
+            instances_by_id[instance['id']] = instance
+
+        print "%-18s\t%-15s\t%-15s\t%s" % (_('network'),
+                                              _('IP address'),
+                                              _('hostname'),
+                                              _('host'))
         for fixed_ip in fixed_ips:
             hostname = None
             host = None
             mac_address = None
             if fixed_ip['instance']:
-                instance = fixed_ip['instance']
+                instance = instances_by_id[fixed_ip['instance_id']]
                 hostname = instance['hostname']
                 host = instance['host']
-                mac_address = fixed_ip['virtual_interface']['address']
-            print "%-18s\t%-15s\t%-17s\t%-15s\t%s" % (
+            print "%-18s\t%-15s\t%-15s\t%s" % (
                     fixed_ip['network']['cidr'],
                     fixed_ip['address'],
-                    mac_address, hostname, host)
+                    hostname, host)
 
     @args('--address', dest="address", metavar='<ip address>',
           help='IP address')
@@ -680,17 +690,28 @@ class FixedIpCommands(object):
 class FloatingIpCommands(object):
     """Class for managing floating ip."""
 
-    @args('--ip_range', dest="range", metavar='<range>', help='IP range')
-    def create(self, range):
+    @args('--ip_range', dest="ip_range", metavar='<range>', help='IP range')
+    @args('--pool', dest="pool", metavar='<pool>', help='Optional pool')
+    @args('--interface', dest="interface", metavar='<interface>',
+          help='Optional interface')
+    def create(self, ip_range, pool=None, interface=None):
         """Creates floating ips for zone by range"""
-        for address in netaddr.IPNetwork(range):
-            db.floating_ip_create(context.get_admin_context(),
-                                  {'address': str(address)})
+        addresses = netaddr.IPNetwork(ip_range)
+        admin_context = context.get_admin_context()
+        if not pool:
+            pool = FLAGS.default_floating_pool
+        if not interface:
+            interface = FLAGS.public_interface
+        for address in addresses.iter_hosts():
+            db.floating_ip_create(admin_context,
+                                  {'address': str(address),
+                                   'pool': pool,
+                                   'interface': interface})
 
     @args('--ip_range', dest="ip_range", metavar='<range>', help='IP range')
     def delete(self, ip_range):
         """Deletes floating ips by range"""
-        for address in netaddr.IPNetwork(ip_range):
+        for address in netaddr.IPNetwork(ip_range).iter_hosts():
             db.floating_ip_destroy(context.get_admin_context(),
                                    str(address))
 
@@ -704,12 +725,16 @@ class FloatingIpCommands(object):
         else:
             floating_ips = db.floating_ip_get_all_by_host(ctxt, host)
         for floating_ip in floating_ips:
-            instance = None
-            if floating_ip['fixed_ip']:
-                instance = floating_ip['fixed_ip']['instance']['hostname']
-            print "%s\t%s\t%s" % (floating_ip['host'],
-                                  floating_ip['address'],
-                                  instance)
+            instance_id = None
+            if floating_ip['fixed_ip_id']:
+                fixed_ip = db.fixed_ip_get(ctxt, floating_ip['fixed_ip_id'])
+                instance = db.instance_get(ctxt, fixed_ip['instance_id'])
+                instance_id = instance.get('uuid', "none")
+            print "%s\t%s\t%s\t%s\t%s" % (floating_ip['project_id'],
+                                          floating_ip['address'],
+                                          instance_id,
+                                          floating_ip['pool'],
+                                          floating_ip['interface'])
 
 
 class NetworkCommands(object):
@@ -727,6 +752,7 @@ class NetworkCommands(object):
     @args('--vpn', dest="vpn_start", help='vpn start')
     @args('--fixed_range_v6', dest="fixed_range_v6",
           help='IPv6 subnet (ex: fe80::/64')
+    @args('--gateway', dest="gateway", help='gateway')
     @args('--gateway_v6', dest="gateway_v6", help='ipv6 gateway')
     @args('--bridge', dest="bridge",
             metavar='<bridge>',
@@ -746,9 +772,10 @@ class NetworkCommands(object):
       help='Network interface priority')
     def create(self, label=None, fixed_range_v4=None, num_networks=None,
                network_size=None, multi_host=None, vlan_start=None,
-               vpn_start=None, fixed_range_v6=None, gateway_v6=None,
-               bridge=None, bridge_interface=None, dns1=None, dns2=None,
-               project_id=None, priority=None, uuid=None):
+               vpn_start=None, fixed_range_v6=None, gateway=None,
+               gateway_v6=None, bridge=None, bridge_interface=None,
+               dns1=None, dns2=None, project_id=None, priority=None,
+               uuid=None):
         """Creates fixed ips for host by range"""
 
         # check for certain required inputs
@@ -811,6 +838,7 @@ class NetworkCommands(object):
                                     vlan_start=int(vlan_start),
                                     vpn_start=int(vpn_start),
                                     cidr_v6=fixed_range_v6,
+                                    gateway=gateway,
                                     gateway_v6=gateway_v6,
                                     bridge=bridge,
                                     bridge_interface=bridge_interface,
@@ -858,16 +886,28 @@ class NetworkCommands(object):
                           network.cidr,
                           network.cidr_v6)
 
-    @args('--network', dest="fixed_range", metavar='<x.x.x.x/yy>',
+    @args('--fixed_range', dest="fixed_range", metavar='<x.x.x.x/yy>',
             help='Network to delete')
-    def delete(self, fixed_range):
+    @args('--uuid', dest='uuid', metavar='<uuid>',
+            help='UUID of network to delete')
+    def delete(self, fixed_range=None, uuid=None):
         """Deletes a network"""
 
-        # delete the network
-        net_manager = utils.import_object(FLAGS.network_manager)
-        net_manager.delete_network(context.get_admin_context(), fixed_range)
+        if fixed_range is None and uuid is None:
+            raise Exception("Please specify either fixed_range or uuid")
 
-    @args('--network', dest="fixed_range", metavar='<x.x.x.x/yy>',
+        net_manager = utils.import_object(FLAGS.network_manager)
+        if "QuantumManager" in FLAGS.network_manager:
+            if uuid is None:
+                raise Exception("UUID is required to delete Quantum Networks")
+            if fixed_range:
+                raise Exception("Deleting by fixed_range is not supported " \
+                    "with the QuantumManager")
+        # delete the network
+        net_manager.delete_network(context.get_admin_context(),
+            fixed_range, uuid)
+
+    @args('--fixed_range', dest="fixed_range", metavar='<x.x.x.x/yy>',
             help='Network to modify')
     @args('--project', dest="project", metavar='<project name>',
             help='Project name to associate')
@@ -945,7 +985,8 @@ class VmCommands(object):
                 instance['availability_zone'],
                 instance['launch_index'])
 
-    def _migration(self, ec2_id, dest, block_migration=False):
+    def _migration(self, ec2_id, dest, block_migration=False,
+                                       disk_over_commit=False):
         """Migrates a running instance to a new machine.
          :param ec2_id: instance id which comes from euca-describe-instance.
          :param dest: destination host name.
@@ -962,9 +1003,8 @@ class VmCommands(object):
             msg = _('Only KVM and QEmu are supported for now. Sorry!')
             raise exception.Error(msg)
 
-        if (FLAGS.volume_driver != 'nova.volume.driver.AOEDriver' and \
-            FLAGS.volume_driver != 'nova.volume.driver.ISCSIDriver'):
-            msg = _("Support only AOEDriver and ISCSIDriver. Sorry!")
+        if FLAGS.volume_driver != 'nova.volume.driver.ISCSIDriver':
+            msg = _("Support only ISCSIDriver. Sorry!")
             raise exception.Error(msg)
 
         rpc.call(ctxt,
@@ -973,7 +1013,8 @@ class VmCommands(object):
                   "args": {"instance_id": instance_id,
                            "dest": dest,
                            "topic": FLAGS.compute_topic,
-                           "block_migration": block_migration}})
+                           "block_migration": block_migration,
+                           "disk_over_commit": disk_over_commit}})
 
         print _('Migration of %s initiated.'
                'Check its progress using euca-describe-instances.') % ec2_id
@@ -988,11 +1029,14 @@ class VmCommands(object):
 
     @args('--ec2_id', dest='ec2_id', metavar='<ec2 id>', help='EC2 ID')
     @args('--dest', dest='dest', metavar='<Destanation>',
-            help='destanation node')
-    def block_migration(self, ec2_id, dest):
+                           help='destanation node')
+    @args('--disk_over_commit', dest='disk_over_commit',
+                           metavar='<overcommit flag>',
+                           help='Allow overcommit (default Flase)')
+    def block_migration(self, ec2_id, dest, disk_over_commit=False):
         """Migrates a running instance to a new machine with storage data."""
 
-        self._migration(ec2_id, dest, True)
+        self._migration(ec2_id, dest, True, disk_over_commit)
 
 
 class ServiceCommands(object):
@@ -1022,7 +1066,7 @@ class ServiceCommands(object):
                     _('Updated_At'))
         for svc in services:
             delta = now - (svc['updated_at'] or svc['created_at'])
-            alive = (delta.seconds <= 15)
+            alive = abs(utils.total_seconds(delta)) <= FLAGS.service_down_time
             art = (alive and ":-)") or "XXX"
             active = 'enabled'
             if svc['disabled']:
@@ -1057,60 +1101,60 @@ class ServiceCommands(object):
 
     @args('--host', dest='host', metavar='<host>', help='Host')
     def describe_resource(self, host):
-        """Describes cpu/memory/hdd info for host."""
+        """Describes cpu/memory/hdd info for host.
 
+        :param host: hostname.
+
+        """
         result = rpc.call(context.get_admin_context(),
                      FLAGS.scheduler_topic,
                      {"method": "show_host_resources",
                       "args": {"host": host}})
 
-        if type(result) != dict:
+        if not isinstance(result, dict):
             print _('An unexpected error has occurred.')
             print _('[Result]'), result
         else:
-            cpu = result['resource']['vcpus']
-            mem = result['resource']['memory_mb']
-            hdd = result['resource']['local_gb']
-            cpu_u = result['resource']['vcpus_used']
-            mem_u = result['resource']['memory_mb_used']
-            hdd_u = result['resource']['local_gb_used']
+            # Printing a total and used_now
+            # (NOTE)The host name width 16 characters
+            print '%(a)-25s%(b)16s%(c)8s%(d)8s%(e)8s' % {"a": _('HOST'),
+                                                         "b": _('PROJECT'),
+                                                         "c": _('cpu'),
+                                                         "d": _('mem(mb)'),
+                                                         "e": _('hdd')}
+            print '%(a)-16s(total)%(b)26s%(c)8s%(d)8s' %\
+                              {"a": host,
+                               "b": result['resource']['vcpus'],
+                               "c": result['resource']['memory_mb'],
+                               "d": result['resource']['local_gb']}
 
+            print '%(a)-16s(used_now)%(b)23s%(c)8s%(d)8s' %\
+                              {"a": host,
+                               "b": result['resource']['vcpus_used'],
+                               "c": result['resource']['memory_mb_used'],
+                               "d": result['resource']['local_gb_used']}
+
+            # Printing a used_max
             cpu_sum = 0
             mem_sum = 0
             hdd_sum = 0
-            print 'HOST\t\t\tPROJECT\t\tcpu\tmem(mb)\tdisk(gb)'
-            print '%s(total)\t\t\t%s\t%s\t%s' % (host, cpu, mem, hdd)
-            print '%s(used_now)\t\t\t%s\t%s\t%s' % (host, cpu_u, mem_u, hdd_u)
             for p_id, val in result['usage'].items():
                 cpu_sum += val['vcpus']
                 mem_sum += val['memory_mb']
-                hdd_sum += val['local_gb']
-            print '%s(used_max)\t\t\t%s\t%s\t%s' % (host, cpu_sum,
-                                                    mem_sum, hdd_sum)
+                hdd_sum += val['root_gb']
+                hdd_sum += val['ephemeral_gb']
+            print '%(a)-16s(used_max)%(b)23s%(c)8s%(d)8s' % {"a": host,
+                                                             "b": cpu_sum,
+                                                             "c": mem_sum,
+                                                             "d": hdd_sum}
 
             for p_id, val in result['usage'].items():
-                print '%s\t\t%s\t\t%s\t%s\t%s' % (host,
-                                                  p_id,
-                                                  val['vcpus'],
-                                                  val['memory_mb'],
-                                                  val['local_gb'])
-
-    @args('--host', dest='host', metavar='<host>', help='Host')
-    def update_resource(self, host):
-        """Updates available vcpu/memory/disk info for host."""
-
-        ctxt = context.get_admin_context()
-        service_refs = db.service_get_all_by_host(ctxt, host)
-        if len(service_refs) <= 0:
-            raise exception.Invalid(_('%s does not exist.') % host)
-
-        service_refs = [s for s in service_refs if s['topic'] == 'compute']
-        if len(service_refs) <= 0:
-            raise exception.Invalid(_('%s is not compute node.') % host)
-
-        rpc.call(ctxt,
-                 db.queue_get_for(ctxt, FLAGS.compute_topic, host),
-                 {"method": "update_available_resource"})
+                print '%(a)-25s%(b)16s%(c)8s%(d)8s%(e)8s' % {
+                        "a": host,
+                        "b": p_id,
+                        "c": val['vcpus'],
+                        "d": val['memory_mb'],
+                        "e": val['root_gb'] + val['ephemeral_gb']}
 
 
 class HostCommands(object):
@@ -1365,7 +1409,7 @@ class VsaCommands(object):
                 raise
 
         is_admin = self.manager.is_admin(user_id)
-        ctxt = context.RequestContext(user_id, project_id, is_admin)
+        ctxt = context.RequestContext(user_id, project_id, is_admin=is_admin)
         if not is_admin and \
            not self.manager.is_project_member(user_id, project_id):
             msg = _("%(user_id)s must be an admin or a "
@@ -1378,7 +1422,7 @@ class VsaCommands(object):
         if storage is not None:
             try:
                 storage_list = ast.literal_eval(storage)
-            except:
+            except Exception:
                 print _("Invalid string format %s") % storage
                 raise
 
@@ -1567,7 +1611,7 @@ class VsaDriveTypeCommands(object):
         except exception.DBError, e:
             print "DB Error: %s" % e
             sys.exit(2)
-        except:
+        except Exception:
             sys.exit(3)
         else:
             print "%s %s" % (name, verb)
@@ -1585,7 +1629,7 @@ class VsaDriveTypeCommands(object):
         if name is not None:
             search_opts['extra_specs']['name'] = name
 
-        if all == False:
+        if not all:
             search_opts['extra_specs']['visible'] = '1'
 
         drives = volume_types.get_all_types(self.context,
@@ -1691,32 +1735,32 @@ class InstanceTypeCommands(object):
 
     def _print_instance_types(self, name, val):
         deleted = ('', ', inactive')[val["deleted"] == 1]
-        print ("%s: Memory: %sMB, VCPUS: %s, Storage: %sGB, FlavorID: %s, "
-            "Swap: %sMB, RXTX Quota: %sGB, RXTX Cap: %sMB%s") % (
-            name, val["memory_mb"], val["vcpus"], val["local_gb"],
-            val["flavorid"], val["swap"], val["rxtx_quota"],
-            val["rxtx_cap"], deleted)
+        print ("%s: Memory: %sMB, VCPUS: %s, Root: %sGB, Ephemeral: %sGb, "
+            "FlavorID: %s, Swap: %sMB, RXTX Factor: %s") % (
+            name, val["memory_mb"], val["vcpus"], val["root_gb"],
+            val["ephemeral_gb"], val["flavorid"], val["swap"],
+            val["rxtx_factor"])
 
     @args('--name', dest='name', metavar='<name>',
             help='Name of instance type/flavor')
     @args('--memory', dest='memory', metavar='<memory size>',
             help='Memory size')
     @args('--cpu', dest='vcpus', metavar='<num cores>', help='Number cpus')
-    @args('--local_gb', dest='local_gb', metavar='<local_gb>',
-            help='local_gb')
+    @args('--root_gb', dest='root_gb', metavar='<root_gb>',
+            help='Root disk size')
+    @args('--ephemeral_gb', dest='ephemeral_gb', metavar='<ephemeral_gb>',
+            help='Ephemeral disk size')
     @args('--flavor', dest='flavorid', metavar='<flavor  id>',
             help='Flavor ID')
     @args('--swap', dest='swap', metavar='<swap>', help='Swap')
-    @args('--rxtx_quota', dest='rxtx_quota', metavar='<rxtx_quota>',
-            help='rxtx_quota')
-    @args('--rxtx_cap', dest='rxtx_cap', metavar='<rxtx_cap>',
-            help='rxtx_cap')
-    def create(self, name, memory, vcpus, local_gb, flavorid,
-               swap=0, rxtx_quota=0, rxtx_cap=0):
+    @args('--rxtx_factor', dest='rxtx_factor', metavar='<rxtx_factor>',
+            help='rxtx_factor')
+    def create(self, name, memory, vcpus, root_gb, ephemeral_gb, flavorid,
+               swap=0, rxtx_factor=1):
         """Creates instance types / flavors"""
         try:
-            instance_types.create(name, memory, vcpus, local_gb,
-                                  flavorid, swap, rxtx_quota, rxtx_cap)
+            instance_types.create(name, memory, vcpus, root_gb,
+                                  ephemeral_gb, flavorid, swap, rxtx_factor)
         except exception.InvalidInput, e:
             print "Must supply valid parameters to create instance_type"
             print e
@@ -1730,7 +1774,7 @@ class InstanceTypeCommands(object):
             print "Currently defined instance_type names and flavorids:"
             self.list("--all")
             sys.exit(2)
-        except:
+        except Exception:
             print "Unknown error"
             sys.exit(3)
         else:
@@ -1755,7 +1799,7 @@ class InstanceTypeCommands(object):
         except exception.DBError, e:
             print "DB Error: %s" % e
             sys.exit(2)
-        except:
+        except Exception:
             sys.exit(3)
         else:
             print "%s %s" % (name, verb)
@@ -1798,18 +1842,19 @@ class ImageCommands(object):
                                'architecture': architecture,
                                'image_location': 'local'}}
         if kernel_id:
-            meta['properties']['kernel_id'] = int(kernel_id)
+            meta['properties']['kernel_id'] = kernel_id
         if ramdisk_id:
-            meta['properties']['ramdisk_id'] = int(ramdisk_id)
+            meta['properties']['ramdisk_id'] = ramdisk_id
         elevated = context.get_admin_context()
         try:
             with open(path) as ifile:
                 image = self.image_service.create(elevated, meta, ifile)
             new = image['id']
-            print _("Image registered to %(new)s (%(new)08x).") % locals()
+            print _("Image registered to %(new)s (%(path)s).") % locals()
             return new
         except Exception as exc:
             print _("Failed to register %(path)s: %(exc)s") % locals()
+            sys.exit(1)
 
     @args('--image', dest='image', metavar='<image>', help='Image')
     @args('--kernel', dest='kernel', metavar='<kernel>', help='Kernel')
@@ -1948,6 +1993,147 @@ class ImageCommands(object):
         self._convert_images(machine_images)
 
 
+class StorageManagerCommands(object):
+    """Class for mangaging Storage Backends and Flavors"""
+
+    def flavor_list(self, flavor=None):
+        ctxt = context.get_admin_context()
+
+        try:
+            if flavor is None:
+                flavors = db.sm_flavor_get_all(ctxt)
+            else:
+                flavors = db.sm_flavor_get(ctxt, flavor)
+        except exception.NotFound as ex:
+            print "error: %s" % ex
+            sys.exit(2)
+
+        print "%-18s\t%-20s\t%s" % (_('id'),
+                                    _('Label'),
+                                    _('Description'))
+
+        for flav in flavors:
+            print "%-18s\t%-20s\t%s" % (
+                    flav['id'],
+                    flav['label'],
+                    flav['description'])
+
+    def flavor_create(self, label, desc):
+        # TODO flavor name must be unique
+        try:
+            db.sm_flavor_create(context.get_admin_context(),
+                                dict(label=label,
+                                     description=desc))
+        except exception.DBError, e:
+            _db_error(e)
+
+    def flavor_delete(self, label):
+        try:
+            db.sm_flavor_delete(context.get_admin_context(), label)
+
+        except exception.DBError, e:
+            _db_error(e)
+
+    def _splitfun(self, item):
+        i = item.split("=")
+        return i[0:2]
+
+    def backend_list(self, backend_conf_id=None):
+        ctxt = context.get_admin_context()
+
+        try:
+            if backend_conf_id is None:
+                backends = db.sm_backend_conf_get_all(ctxt)
+            else:
+                backends = db.sm_backend_conf_get(ctxt, backend_conf_id)
+
+        except exception.NotFound as ex:
+            print "error: %s" % ex
+            sys.exit(2)
+
+        print "%-5s\t%-10s\t%-40s\t%-10s\t%s" % (_('id'),
+                                                      _('Flavor id'),
+                                                      _('SR UUID'),
+                                                      _('SR Type'),
+                                                      _('Config Parameters'),)
+
+        for b in backends:
+            print "%-5s\t%-10s\t%-40s\t%-10s\t%s" % (b['id'],
+                                                     b['flavor_id'],
+                                                     b['sr_uuid'],
+                                                     b['sr_type'],
+                                                     b['config_params'],)
+
+    def backend_add(self, flavor_label, sr_type, *args):
+        # TODO Add backend_introduce.
+        ctxt = context.get_admin_context()
+        params = dict(map(self._splitfun, args))
+
+        if 'sr_uuid' in params:
+            try:
+                backend = db.sm_backend_conf_get_by_sr(ctxt,
+                                                       params['sr_uuid'])
+            except exception.DBError, e:
+                _db_error(e)
+
+            if backend:
+                if len(backend) > 1:
+                    print 'error: Multiple backends found with given sr_uuid'
+                    sys.exit(2)
+
+                print 'Backend config found. Would you like to recreate this?'
+                print '(WARNING:Recreating will destroy all VDIs on backend!!)'
+                c = raw_input('Proceed? (y/n) ')
+                if c == 'y' or c == 'Y':
+                    try:
+                        db.sm_backend_conf_update(ctxt, backend['id'],
+                                                  dict(created=False))
+                    except exception.DBError, e:
+                        _db_error(e)
+                return
+
+            else:
+                print 'Backend config not found. Would you like to create it?'
+                print '(WARNING: Creating will destroy all data on backend!!!)'
+                c = raw_input('Proceed? (y/n) ')
+                if c != 'y' and c != 'Y':
+                    return
+
+        print '(WARNING: Creating will destroy all data on backend!!!)'
+        c = raw_input('Proceed? (y/n) ')
+        if c == 'y' or c == 'Y':
+            if flavor_label is None:
+                print "error: backend needs to be associated with flavor"
+                sys.exit(2)
+
+            try:
+                flavors = db.sm_flavor_get(ctxt, flavor_label)
+
+            except exception.NotFound as ex:
+                print "error: %s" % ex
+                sys.exit(2)
+
+            config_params = "".join(['%s=%s ' %
+                                   (key, params[key]) for key in params])
+
+            try:
+                db.sm_backend_conf_create(ctxt,
+                                          dict(flavor_id=flavors[0]['id'],
+                                               sr_uuid=None,
+                                               sr_type=sr_type,
+                                               config_params=config_params))
+            except exception.DBError, e:
+                _db_error(e)
+
+    def backend_remove(self, backend_conf_id):
+        try:
+            db.sm_backend_conf_delete(context.get_admin_context(),
+                                      backend_conf_id)
+
+        except exception.DBError, e:
+            _db_error(e)
+
+
 class AgentBuildCommands(object):
     """Class for managing agent builds."""
 
@@ -2015,7 +2201,50 @@ class ConfigCommands(object):
         pass
 
     def list(self):
-        print FLAGS.FlagsIntoString()
+        for key, value in FLAGS.FlagValuesDict().iteritems():
+            if value is not None:
+                print '%s = %s' % (key, value)
+
+
+class GetLogCommands(object):
+    """Get logging information"""
+
+    def errors(self):
+        """Get all of the errors from the log files"""
+        if FLAGS.logdir:
+            error_found = 0
+            logs = [x for x in os.listdir(FLAGS.logdir) if x.endswith('.log')]
+            for file in logs:
+                log_file = os.path.join(FLAGS.logdir, file)
+                lines = [line.strip() for line in open(log_file, "r")]
+                lines.reverse()
+                print_name = 0
+                for index, line in enumerate(lines):
+                    if line.find(" ERROR ") > 0:
+                        error_found += 1
+                        if print_name == 0:
+                            print log_file + ":-"
+                            print_name = 1
+                        print "Line %d : %s" % (len(lines) - index, line)
+        if error_found == 0:
+            print "No errors in logfiles!"
+
+    def syslog(self, num_entries=10):
+        """Get <num_entries> of the nova syslog events"""
+        entries = int(num_entries)
+        count = 0
+        lines = [line.strip() for line in open('/var/log/syslog', "r")]
+        lines.reverse()
+        print "Last %s nova syslog entries:-" % (entries)
+        for line in lines:
+            if line.find("nova") > 0:
+                count += 1
+                print "%s" % (line)
+            if count == entries:
+                break
+
+        if count == 0:
+            print "No nova entries in syslog!"
 
 
 CATEGORIES = [
@@ -2035,12 +2264,14 @@ CATEGORIES = [
     ('role', RoleCommands),
     ('service', ServiceCommands),
     ('shell', ShellCommands),
+    ('sm', StorageManagerCommands),
     ('user', UserCommands),
     ('version', VersionCommands),
     ('vm', VmCommands),
     ('volume', VolumeCommands),
     ('vpn', VpnCommands),
-    ('vsa', VsaCommands)]
+    ('vsa', VsaCommands),
+    ('logs', GetLogCommands)]
 
 
 def lazy_match(name, key_value_tuples):
@@ -2114,7 +2345,7 @@ def main():
     options = getattr(fn, 'options', [])
 
     usage = "%%prog %s %s <args> [options]" % (category, action)
-    parser = OptionParser(usage=usage)
+    parser = optparse.OptionParser(usage=usage)
     for ar, kw in options:
         parser.add_option(*ar, **kw)
     (opts, fn_args) = parser.parse_args(argv)

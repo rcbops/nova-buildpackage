@@ -24,10 +24,14 @@ import datetime
 # TODO(termie): replace minidom with etree
 from xml.dom import minidom
 
-from nova import log as logging
+from nova.api.ec2 import admin
 from nova.api.ec2 import ec2utils
+from nova import exception
+from nova import flags
+from nova import log as logging
 
 LOG = logging.getLogger("nova.api.request")
+FLAGS = flags.FLAGS
 
 
 def _underscore_to_camelcase(str):
@@ -53,6 +57,14 @@ class APIRequest(object):
 
     def invoke(self, context):
         try:
+            # Raise NotImplemented exception for Admin specific request if
+            # admin flag is set to false in nova.conf
+            if (isinstance(self.controller, admin.AdminController)
+                          and (not FLAGS.allow_ec2_admin_api)):
+                ## Raise InvalidRequest exception for EC2 Admin interface ##
+                LOG.exception("Unsupported API request")
+                raise exception.InvalidRequest()
+
             method = getattr(self.controller,
                              ec2utils.camelcase_to_underscore(self.action))
         except AttributeError:
@@ -63,7 +75,7 @@ class APIRequest(object):
             LOG.exception(_error)
             # TODO: Raise custom exception, trap in apiserver,
             #       and reraise as 400 error.
-            raise Exception(_error)
+            raise exception.InvalidRequest()
 
         args = ec2utils.dict_from_dotted_str(self.args.items())
 
@@ -87,7 +99,7 @@ class APIRequest(object):
         request_id_el = xml.createElement('requestId')
         request_id_el.appendChild(xml.createTextNode(request_id))
         response_el.appendChild(request_id_el)
-        if(response_data == True):
+        if response_data is True:
             self._render_dict(xml, response_el, {'return': 'true'})
         else:
             self._render_dict(xml, response_el, response_data)
@@ -96,7 +108,13 @@ class APIRequest(object):
 
         response = xml.toxml()
         xml.unlink()
-        LOG.debug(response)
+
+        # Don't write private key to log
+        if self.action != "CreateKeyPair":
+            LOG.debug(response)
+        else:
+            LOG.debug("CreateKeyPair: Return Private Key")
+
         return response
 
     def _render_dict(self, xml, el, data):

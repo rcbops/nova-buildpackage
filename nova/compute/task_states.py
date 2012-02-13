@@ -43,13 +43,14 @@ RESIZE_REVERTING = 'resize_reverting'
 RESIZE_CONFIRMING = 'resize_confirming'
 RESIZE_VERIFY = 'resize_verify'
 
-REBUILDING = 'rebuilding'
-
 REBOOTING = 'rebooting'
+REBOOTING_HARD = 'rebooting_hard'
 PAUSING = 'pausing'
 UNPAUSING = 'unpausing'
 SUSPENDING = 'suspending'
 RESUMING = 'resuming'
+POWERING_OFF = 'powering-off'
+POWERING_ON = 'powering-on'
 
 RESCUING = 'rescuing'
 UNRESCUING = 'unrescuing'

@@ -28,13 +28,11 @@ sys.dont_write_bytecode = True
 import imp
 nova_manage = imp.load_source('nova_manage.py', NOVA_MANAGE_PATH)
 sys.dont_write_bytecode = False
-import mox
 import stubout
 
 import StringIO
 from nova import context
 from nova import db
-from nova import exception
 from nova import test
 from nova.tests.db import fakes as db_fakes
 
@@ -108,11 +106,17 @@ class NetworkCommandsTestCase(test.TestCase):
             self.assertEqual(cidr, self.fake_net['cidr'])
             return db_fakes.FakeModel(self.fake_net)
 
+        def fake_network_get_by_uuid(context, uuid):
+            self.assertTrue(context.to_dict()['is_admin'])
+            self.assertEqual(uuid, self.fake_net['uuid'])
+            return db_fakes.FakeModel(self.fake_net)
+
         def fake_network_update(context, network_id, values):
             self.assertTrue(context.to_dict()['is_admin'])
             self.assertEqual(network_id, self.fake_net['id'])
             self.assertEqual(values, self.fake_update_value)
         self.fake_network_get_by_cidr = fake_network_get_by_cidr
+        self.fake_network_get_by_uuid = fake_network_get_by_uuid
         self.fake_network_update = fake_network_update
 
     def tearDown(self):
@@ -131,6 +135,7 @@ class NetworkCommandsTestCase(test.TestCase):
             self.assertEqual(kwargs['vlan_start'], 200)
             self.assertEqual(kwargs['vpn_start'], 2000)
             self.assertEqual(kwargs['cidr_v6'], 'fd00:2::/120')
+            self.assertEqual(kwargs['gateway'], '10.2.0.1')
             self.assertEqual(kwargs['gateway_v6'], 'fd00:2::22')
             self.assertEqual(kwargs['bridge'], 'br200')
             self.assertEqual(kwargs['bridge_interface'], 'eth0')
@@ -149,11 +154,13 @@ class NetworkCommandsTestCase(test.TestCase):
                             vlan_start=200,
                             vpn_start=2000,
                             fixed_range_v6='fd00:2::/120',
+                            gateway='10.2.0.1',
                             gateway_v6='fd00:2::22',
                             bridge='br200',
                             bridge_interface='eth0',
                             dns1='8.8.8.8',
-                            dns2='8.8.4.4')
+                            dns2='8.8.4.4',
+                            uuid='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
 
     def test_list(self):
 
@@ -190,6 +197,19 @@ class NetworkCommandsTestCase(test.TestCase):
         self.assertEqual(result, answer)
 
     def test_delete(self):
+        self.fake_net = self.net
+        self.fake_net['project_id'] = None
+        self.fake_net['host'] = None
+        self.stubs.Set(db, 'network_get_by_uuid',
+                       self.fake_network_get_by_uuid)
+
+        def fake_network_delete_safe(context, network_id):
+            self.assertTrue(context.to_dict()['is_admin'])
+            self.assertEqual(network_id, self.fake_net['id'])
+        self.stubs.Set(db, 'network_delete_safe', fake_network_delete_safe)
+        self.commands.delete(uuid=self.fake_net['uuid'])
+
+    def test_delete_by_cidr(self):
         self.fake_net = self.net
         self.fake_net['project_id'] = None
         self.fake_net['host'] = None

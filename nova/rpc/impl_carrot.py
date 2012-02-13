@@ -24,11 +24,11 @@ No fan-out support yet.
 
 """
 
+import inspect
 import json
 import sys
 import time
 import traceback
-import types
 import uuid
 
 from carrot import connection as carrot_connection
@@ -41,9 +41,11 @@ import greenlet
 
 from nova import context
 from nova import exception
-from nova import fakerabbit
 from nova import flags
+from nova import local
+from nova.rpc import common as rpc_common
 from nova.rpc.common import RemoteError, LOG
+from nova.testing import fake
 
 # Needed for tests
 eventlet.monkey_patch()
@@ -51,7 +53,7 @@ eventlet.monkey_patch()
 FLAGS = flags.FLAGS
 
 
-class Connection(carrot_connection.BrokerConnection):
+class Connection(carrot_connection.BrokerConnection, rpc_common.Connection):
     """Connection instance object."""
 
     def __init__(self, *args, **kwargs):
@@ -71,7 +73,7 @@ class Connection(carrot_connection.BrokerConnection):
                           virtual_host=FLAGS.rabbit_virtual_host)
 
             if FLAGS.fake_rabbit:
-                params['backend_cls'] = fakerabbit.Backend
+                params['backend_cls'] = fake.rabbit.Backend
 
             # NOTE(vish): magic is fun!
             # pylint: disable=W0142
@@ -105,7 +107,7 @@ class Connection(carrot_connection.BrokerConnection):
                 # ignore all errors
                 pass
         self._rpc_consumers = []
-        super(Connection, self).close()
+        carrot_connection.BrokerConnection.close(self)
 
     def consume_in_thread(self):
         """Consumer from all queues/consumers in a greenthread"""
@@ -252,7 +254,11 @@ class AdapterConsumer(Consumer):
         Example: {'method': 'echo', 'args': {'value': 42}}
 
         """
-        LOG.debug(_('received %s') % message_data)
+        # It is important to clear the context here, because at this point
+        # the previous context is stored in local.store.context
+        if hasattr(local.store, 'context'):
+            del local.store.context
+        rpc_common._safe_log(LOG.debug, _('received %s'), message_data)
         # This will be popped off in _unpack_context
         msg_id = message_data.get('_msg_id', None)
         ctxt = _unpack_context(message_data)
@@ -266,15 +272,14 @@ class AdapterConsumer(Consumer):
             #             we just log the message and send an error string
             #             back to the caller
             LOG.warn(_('no method for message: %s') % message_data)
-            if msg_id:
-                msg_reply(msg_id,
-                          _('No method for message: %s') % message_data)
+            ctxt.reply(msg_id,
+                    _('No method for message: %s') % message_data)
             return
-        self.pool.spawn_n(self._process_data, msg_id, ctxt, method, args)
+        self.pool.spawn_n(self._process_data, ctxt, method, args)
 
     @exception.wrap_exception()
-    def _process_data(self, msg_id, ctxt, method, args):
-        """Thread that maigcally looks for a method on the proxy
+    def _process_data(self, ctxt, method, args):
+        """Thread that magically looks for a method on the proxy
         object and calls it.
         """
 
@@ -283,23 +288,18 @@ class AdapterConsumer(Consumer):
         # NOTE(vish): magic is fun!
         try:
             rval = node_func(context=ctxt, **node_args)
-            if msg_id:
-                # Check if the result was a generator
-                if isinstance(rval, types.GeneratorType):
-                    for x in rval:
-                        msg_reply(msg_id, x, None)
-                else:
-                    msg_reply(msg_id, rval, None)
+            # Check if the result was a generator
+            if inspect.isgenerator(rval):
+                for x in rval:
+                    ctxt.reply(x, None)
+            else:
+                ctxt.reply(rval, None)
 
-                # This final None tells multicall that it is done.
-                msg_reply(msg_id, None, None)
-            elif isinstance(rval, types.GeneratorType):
-                # NOTE(vish): this iterates through the generator
-                list(rval)
+            # This final None tells multicall that it is done.
+            ctxt.reply(ending=True)
         except Exception as e:
             LOG.exception('Exception during message handling')
-            if msg_id:
-                msg_reply(msg_id, None, sys.exc_info())
+            ctxt.reply(None, sys.exc_info())
         return
 
 
@@ -397,10 +397,11 @@ class TopicPublisher(Publisher):
 
     exchange_type = 'topic'
 
-    def __init__(self, connection=None, topic='broadcast'):
+    def __init__(self, connection=None, topic='broadcast', durable=None):
         self.routing_key = topic
         self.exchange = FLAGS.control_exchange
-        self.durable = FLAGS.rabbit_durable_queues
+        self.durable = FLAGS.rabbit_durable_queues \
+                       if durable is None else durable
         super(TopicPublisher, self).__init__(connection=connection)
 
 
@@ -447,7 +448,7 @@ class DirectPublisher(Publisher):
         super(DirectPublisher, self).__init__(connection=connection)
 
 
-def msg_reply(msg_id, reply=None, failure=None):
+def msg_reply(msg_id, reply=None, failure=None, ending=False):
     """Sends a reply or an error on the channel signified by msg_id.
 
     Failure should be a sys.exc_info() tuple.
@@ -463,12 +464,17 @@ def msg_reply(msg_id, reply=None, failure=None):
     with ConnectionPool.item() as conn:
         publisher = DirectPublisher(connection=conn, msg_id=msg_id)
         try:
-            publisher.send({'result': reply, 'failure': failure})
+            msg = {'result': reply, 'failure': failure}
+            if ending:
+                msg['ending'] = True
+            publisher.send(msg)
         except TypeError:
-            publisher.send(
-                    {'result': dict((k, repr(v))
-                                    for k, v in reply.__dict__.iteritems()),
-                     'failure': failure})
+            msg = {'result': dict((k, repr(v))
+                            for k, v in reply.__dict__.iteritems()),
+                    'failure': failure}
+            if ending:
+                msg['ending'] = True
+            publisher.send(msg)
 
         publisher.close()
 
@@ -484,8 +490,9 @@ def _unpack_context(msg):
             value = msg.pop(key)
             context_dict[key[9:]] = value
     context_dict['msg_id'] = msg.pop('_msg_id', None)
-    LOG.debug(_('unpacked context: %s'), context_dict)
-    return RpcContext.from_dict(context_dict)
+    ctx = RpcContext.from_dict(context_dict)
+    LOG.debug(_('unpacked context: %s'), ctx.to_dict())
+    return ctx
 
 
 def _pack_context(msg, context):
@@ -508,8 +515,11 @@ class RpcContext(context.RequestContext):
         self.msg_id = msg_id
         super(RpcContext, self).__init__(*args, **kwargs)
 
-    def reply(self, *args, **kwargs):
-        msg_reply(self.msg_id, *args, **kwargs)
+    def reply(self, reply=None, failure=None, ending=False):
+        if self.msg_id:
+            msg_reply(self.msg_id, reply, failure, ending)
+            if ending:
+                self.msg_id = None
 
 
 def multicall(context, topic, msg):
@@ -537,8 +547,11 @@ class MulticallWaiter(object):
         self._consumer = consumer
         self._results = queue.Queue()
         self._closed = False
+        self._got_ending = False
 
     def close(self):
+        if self._closed:
+            return
         self._closed = True
         self._consumer.close()
         ConnectionPool.put(self._consumer.connection)
@@ -548,6 +561,8 @@ class MulticallWaiter(object):
         message.ack()
         if data['failure']:
             self._results.put(RemoteError(*data['failure']))
+        elif data.get('ending', False):
+            self._got_ending = True
         else:
             self._results.put(data['result'])
 
@@ -555,23 +570,22 @@ class MulticallWaiter(object):
         return self.wait()
 
     def wait(self):
-        while True:
-            rv = None
-            while rv is None and not self._closed:
-                try:
-                    rv = self._consumer.fetch(enable_callbacks=True)
-                except Exception:
-                    self.close()
-                    raise
+        while not self._closed:
+            try:
+                rv = self._consumer.fetch(enable_callbacks=True)
+            except Exception:
+                self.close()
+                raise
+            if rv is None:
                 time.sleep(0.01)
-
+                continue
+            if self._got_ending:
+                self.close()
+                raise StopIteration
             result = self._results.get()
             if isinstance(result, Exception):
                 self.close()
                 raise result
-            if result == None:
-                self.close()
-                raise StopIteration
             yield result
 
 
@@ -606,6 +620,17 @@ def fanout_cast(context, topic, msg):
     _pack_context(msg, context)
     with ConnectionPool.item() as conn:
         publisher = FanoutPublisher(topic, connection=conn)
+        publisher.send(msg)
+        publisher.close()
+
+
+def notify(context, topic, msg):
+    """Sends a notification event on a topic."""
+    LOG.debug(_('Sending notification on %s...'), topic)
+    _pack_context(msg, context)
+    with ConnectionPool.item() as conn:
+        publisher = TopicPublisher(connection=conn, topic=topic,
+                                   durable=True)
         publisher.send(msg)
         publisher.close()
 

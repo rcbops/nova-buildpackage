@@ -13,21 +13,18 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import stubout
-
-import nova
-
 from nova import context
 from nova import db
 from nova import exception
 from nova import flags
 from nova import log as logging
+from nova import rpc
+from nova.scheduler import vsa as vsa_sched
 from nova import test
+from nova.tests.scheduler import test_scheduler
 from nova import utils
 from nova.volume import volume_types
 
-from nova.scheduler import vsa as vsa_sched
-from nova.scheduler import driver
 
 FLAGS = flags.FLAGS
 LOG = logging.getLogger('nova.tests.scheduler.vsa')
@@ -35,6 +32,10 @@ LOG = logging.getLogger('nova.tests.scheduler.vsa')
 scheduled_volumes = []
 scheduled_volume = {}
 global_volume = {}
+
+
+def fake_rpc_cast(*args, **kwargs):
+    pass
 
 
 class FakeVsaLeastUsedScheduler(
@@ -49,7 +50,32 @@ class FakeVsaMostAvailCapacityScheduler(
     pass
 
 
-class VsaSchedulerTestCase(test.TestCase):
+class VsaSchedulerTestCase(test_scheduler.SchedulerTestCase):
+
+    driver_cls = FakeVsaLeastUsedScheduler
+
+    def setUp(self):
+        super(VsaSchedulerTestCase, self).setUp()
+
+        self.host_num = 10
+        self.drive_type_num = 5
+
+        self.stubs.Set(rpc, 'cast', fake_rpc_cast)
+        self.stubs.Set(self.driver,
+                        '_get_service_states', self._fake_get_service_states)
+        self.stubs.Set(self.driver,
+                        '_provision_volume', self._fake_provision_volume)
+        self.stubs.Set(db, 'vsa_update', self._fake_vsa_update)
+
+        self.stubs.Set(db, 'volume_get', self._fake_volume_get)
+        self.stubs.Set(db, 'volume_update', self._fake_volume_update)
+
+        self.created_types_lst = []
+
+    def tearDown(self):
+        for name in self.created_types_lst:
+            volume_types.purge(self.context.elevated(), name)
+        super(VsaSchedulerTestCase, self).tearDown()
 
     def _get_vol_creation_request(self, num_vols, drive_ix, size=0):
         volume_params = []
@@ -57,7 +83,7 @@ class VsaSchedulerTestCase(test.TestCase):
 
             name = 'name_' + str(i)
             try:
-                volume_types.create(self.context, name,
+                volume_types.create(self.context.elevated(), name,
                             extra_specs={'type': 'vsa_drive',
                                          'drive_name': name,
                                          'drive_type': 'type_' + str(drive_ix),
@@ -170,12 +196,10 @@ class VsaSchedulerTestCase(test.TestCase):
         LOG.debug(_("Test: provision vol %(name)s on host %(host)s"),
                     locals())
         LOG.debug(_("\t vol=%(vol)s"), locals())
-        pass
 
     def _fake_vsa_update(self, context, vsa_id, values):
         LOG.debug(_("Test: VSA update request: vsa_id=%(vsa_id)s "\
                     "values=%(values)s"), locals())
-        pass
 
     def _fake_volume_create(self, context, options):
         LOG.debug(_("Test: Volume create: %s"), options)
@@ -196,47 +220,15 @@ class VsaSchedulerTestCase(test.TestCase):
                     "values=%(values)s"), locals())
         global scheduled_volume
         scheduled_volume = {'id': volume_id, 'host': values['host']}
-        pass
 
     def _fake_service_get_by_args(self, context, host, binary):
-        return "service"
+        return {'host': 'fake_host', 'disabled': False}
 
     def _fake_service_is_up_True(self, service):
         return True
 
     def _fake_service_is_up_False(self, service):
         return False
-
-    def setUp(self, sched_class=None):
-        super(VsaSchedulerTestCase, self).setUp()
-        self.stubs = stubout.StubOutForTesting()
-        self.context = context.get_admin_context()
-
-        if sched_class is None:
-            self.sched = FakeVsaLeastUsedScheduler()
-        else:
-            self.sched = sched_class
-
-        self.host_num = 10
-        self.drive_type_num = 5
-
-        self.stubs.Set(self.sched,
-                        '_get_service_states', self._fake_get_service_states)
-        self.stubs.Set(self.sched,
-                        '_provision_volume', self._fake_provision_volume)
-        self.stubs.Set(nova.db, 'vsa_update', self._fake_vsa_update)
-
-        self.stubs.Set(nova.db, 'volume_get', self._fake_volume_get)
-        self.stubs.Set(nova.db, 'volume_update', self._fake_volume_update)
-
-        self.created_types_lst = []
-
-    def tearDown(self):
-        for name in self.created_types_lst:
-            volume_types.purge(self.context, name)
-
-        self.stubs.UnsetAll()
-        super(VsaSchedulerTestCase, self).tearDown()
 
     def test_vsa_sched_create_volumes_simple(self):
         global scheduled_volumes
@@ -249,7 +241,7 @@ class VsaSchedulerTestCase(test.TestCase):
         prev = self._generate_default_service_states()
         request_spec = self._get_vol_creation_request(num_vols=3, drive_ix=2)
 
-        self.sched.schedule_create_volumes(self.context,
+        self.driver.schedule_create_volumes(self.context,
                                            request_spec,
                                            availability_zone=None)
 
@@ -274,8 +266,8 @@ class VsaSchedulerTestCase(test.TestCase):
                                  drive_type_num=5,
                                  init_num_drives=1)
         request_spec = self._get_vol_creation_request(num_vols=1, drive_ix=6)
-        self.assertRaises(driver.WillNotSchedule,
-                          self.sched.schedule_create_volumes,
+        self.assertRaises(exception.NoValidHost,
+                          self.driver.schedule_create_volumes,
                                 self.context,
                                 request_spec,
                                 availability_zone=None)
@@ -291,8 +283,8 @@ class VsaSchedulerTestCase(test.TestCase):
         prev = self._generate_default_service_states()
         request_spec = self._get_vol_creation_request(num_vols=3, drive_ix=0)
 
-        self.assertRaises(driver.WillNotSchedule,
-                          self.sched.schedule_create_volumes,
+        self.assertRaises(exception.NoValidHost,
+                          self.driver.schedule_create_volumes,
                                 self.context,
                                 request_spec,
                                 availability_zone=None)
@@ -314,8 +306,8 @@ class VsaSchedulerTestCase(test.TestCase):
         self.service_states = new_states
         request_spec = self._get_vol_creation_request(num_vols=1, drive_ix=0)
 
-        self.assertRaises(driver.WillNotSchedule,
-                          self.sched.schedule_create_volumes,
+        self.assertRaises(exception.NoValidHost,
+                          self.driver.schedule_create_volumes,
                                 self.context,
                                 request_spec,
                                 availability_zone=None)
@@ -330,11 +322,13 @@ class VsaSchedulerTestCase(test.TestCase):
         request_spec = self._get_vol_creation_request(num_vols=1, drive_ix=0)
 
         self.stubs.UnsetAll()
-        self.stubs.Set(self.sched,
+        self.stubs.Set(self.driver,
                         '_get_service_states', self._fake_get_service_states)
-        self.stubs.Set(nova.db, 'volume_create', self._fake_volume_create)
+        self.stubs.Set(db, 'volume_create', self._fake_volume_create)
+        self.stubs.Set(db, 'volume_update', self._fake_volume_update)
+        self.stubs.Set(rpc, 'cast', fake_rpc_cast)
 
-        self.sched.schedule_create_volumes(self.context,
+        self.driver.schedule_create_volumes(self.context,
                                            request_spec,
                                            availability_zone=None)
 
@@ -348,7 +342,7 @@ class VsaSchedulerTestCase(test.TestCase):
                                  init_num_drives=1)
         request_spec = self._get_vol_creation_request(num_vols=1, drive_ix=0)
 
-        self.sched.schedule_create_volumes(self.context,
+        self.driver.schedule_create_volumes(self.context,
                                            request_spec,
                                            availability_zone=None)
 
@@ -358,13 +352,13 @@ class VsaSchedulerTestCase(test.TestCase):
 
         new_request = self._get_vol_creation_request(num_vols=1, drive_ix=0)
 
-        self.sched.schedule_create_volumes(self.context,
+        self.driver.schedule_create_volumes(self.context,
                                            request_spec,
                                            availability_zone=None)
         self._print_service_states()
 
-        self.assertRaises(driver.WillNotSchedule,
-                          self.sched.schedule_create_volumes,
+        self.assertRaises(exception.NoValidHost,
+                          self.driver.schedule_create_volumes,
                                 self.context,
                                 new_request,
                                 availability_zone=None)
@@ -381,26 +375,26 @@ class VsaSchedulerTestCase(test.TestCase):
         request_spec = self._get_vol_creation_request(num_vols=3, drive_ix=2)
 
         self.assertRaises(exception.HostBinaryNotFound,
-                          self.sched.schedule_create_volumes,
-                                self.context,
+                          self.driver.schedule_create_volumes,
+                                self.context.elevated(),
                                 request_spec,
                                 availability_zone="nova:host_5")
 
-        self.stubs.Set(nova.db,
+        self.stubs.Set(db,
                         'service_get_by_args', self._fake_service_get_by_args)
-        self.stubs.Set(self.sched,
+        self.stubs.Set(utils,
                         'service_is_up', self._fake_service_is_up_False)
 
-        self.assertRaises(driver.WillNotSchedule,
-                          self.sched.schedule_create_volumes,
-                                self.context,
+        self.assertRaises(exception.WillNotSchedule,
+                          self.driver.schedule_create_volumes,
+                                self.context.elevated(),
                                 request_spec,
                                 availability_zone="nova:host_5")
 
-        self.stubs.Set(self.sched,
+        self.stubs.Set(utils,
                         'service_is_up', self._fake_service_is_up_True)
 
-        self.sched.schedule_create_volumes(self.context,
+        self.driver.schedule_create_volumes(self.context.elevated(),
                                            request_spec,
                                            availability_zone="nova:host_5")
 
@@ -421,7 +415,7 @@ class VsaSchedulerTestCase(test.TestCase):
         request_spec = self._get_vol_creation_request(num_vols=3,
                                                       drive_ix=3,
                                                       size=50)
-        self.sched.schedule_create_volumes(self.context,
+        self.driver.schedule_create_volumes(self.context,
                                            request_spec,
                                            availability_zone=None)
 
@@ -461,16 +455,15 @@ class VsaSchedulerTestCase(test.TestCase):
             LOG.debug(_("Test: Volume get: id=%(volume_id)s"), locals())
             return {'id': volume_id, 'availability_zone': 'nova:host_3'}
 
-        self.stubs.Set(nova.db, 'volume_get', _fake_volume_get_az)
-        self.stubs.Set(nova.db,
-                        'service_get_by_args', self._fake_service_get_by_args)
-        self.stubs.Set(self.sched,
+        self.stubs.Set(db, 'volume_get', _fake_volume_get_az)
+        self.stubs.Set(db, 'service_get_by_args',
+                self._fake_service_get_by_args)
+        self.stubs.Set(utils,
                         'service_is_up', self._fake_service_is_up_True)
 
-        host = self.sched.schedule_create_volume(self.context,
-                                                 123, availability_zone=None)
+        self.driver.schedule_create_volume(self.context.elevated(),
+                123, availability_zone=None)
 
-        self.assertEqual(host, 'host_3')
         self.assertEqual(scheduled_volume['id'], 123)
         self.assertEqual(scheduled_volume['host'], 'host_3')
 
@@ -482,11 +475,11 @@ class VsaSchedulerTestCase(test.TestCase):
         global_volume = {}
         global_volume['volume_type_id'] = None
 
-        self.assertRaises(driver.NoValidHost,
-                          self.sched.schedule_create_volume,
-                                self.context,
-                                123,
-                                availability_zone=None)
+        self.assertRaises(exception.NoValidHost,
+                self.driver.schedule_create_volume,
+                self.context,
+                123,
+                availability_zone=None)
 
     def test_vsa_sched_create_single_volume(self):
         global scheduled_volume
@@ -503,7 +496,7 @@ class VsaSchedulerTestCase(test.TestCase):
 
         drive_ix = 2
         name = 'name_' + str(drive_ix)
-        volume_types.create(self.context, name,
+        volume_types.create(self.context.elevated(), name,
                     extra_specs={'type': 'vsa_drive',
                                  'drive_name': name,
                                  'drive_type': 'type_' + str(drive_ix),
@@ -514,23 +507,16 @@ class VsaSchedulerTestCase(test.TestCase):
         global_volume['volume_type_id'] = volume_type['id']
         global_volume['size'] = 0
 
-        host = self.sched.schedule_create_volume(self.context,
-                                                 123, availability_zone=None)
+        self.driver.schedule_create_volume(self.context,
+                123, availability_zone=None)
 
-        self.assertEqual(host, 'host_2')
         self.assertEqual(scheduled_volume['id'], 123)
         self.assertEqual(scheduled_volume['host'], 'host_2')
 
 
 class VsaSchedulerTestCaseMostAvail(VsaSchedulerTestCase):
 
-    def setUp(self):
-        super(VsaSchedulerTestCaseMostAvail, self).setUp(
-                    FakeVsaMostAvailCapacityScheduler())
-
-    def tearDown(self):
-        self.stubs.UnsetAll()
-        super(VsaSchedulerTestCaseMostAvail, self).tearDown()
+    driver_cls = FakeVsaMostAvailCapacityScheduler
 
     def test_vsa_sched_create_single_volume(self):
         global scheduled_volume
@@ -547,7 +533,7 @@ class VsaSchedulerTestCaseMostAvail(VsaSchedulerTestCase):
 
         drive_ix = 2
         name = 'name_' + str(drive_ix)
-        volume_types.create(self.context, name,
+        volume_types.create(self.context.elevated(), name,
                     extra_specs={'type': 'vsa_drive',
                                  'drive_name': name,
                                  'drive_type': 'type_' + str(drive_ix),
@@ -558,10 +544,9 @@ class VsaSchedulerTestCaseMostAvail(VsaSchedulerTestCase):
         global_volume['volume_type_id'] = volume_type['id']
         global_volume['size'] = 0
 
-        host = self.sched.schedule_create_volume(self.context,
-                                                 123, availability_zone=None)
+        self.driver.schedule_create_volume(self.context,
+                123, availability_zone=None)
 
-        self.assertEqual(host, 'host_9')
         self.assertEqual(scheduled_volume['id'], 123)
         self.assertEqual(scheduled_volume['host'], 'host_9')
 
@@ -578,7 +563,7 @@ class VsaSchedulerTestCaseMostAvail(VsaSchedulerTestCase):
 
         self._print_service_states()
 
-        self.sched.schedule_create_volumes(self.context,
+        self.driver.schedule_create_volumes(self.context,
                                            request_spec,
                                            availability_zone=None)
 
@@ -609,7 +594,7 @@ class VsaSchedulerTestCaseMostAvail(VsaSchedulerTestCase):
         request_spec = self._get_vol_creation_request(num_vols=3,
                                                       drive_ix=3,
                                                       size=50)
-        self.sched.schedule_create_volumes(self.context,
+        self.driver.schedule_create_volumes(self.context,
                                            request_spec,
                                            availability_zone=None)
 

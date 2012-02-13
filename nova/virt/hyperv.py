@@ -63,10 +63,10 @@ Using the Python WMI library:
 import os
 import time
 
+from nova.compute import power_state
 from nova import exception
 from nova import flags
 from nova import log as logging
-from nova.compute import power_state
 from nova.virt import driver
 from nova.virt import images
 
@@ -138,7 +138,7 @@ class HyperVConnection(driver.ComputeDriver):
 
         return instance_infos
 
-    def spawn(self, context, instance,
+    def spawn(self, context, instance, image_meta,
               network_info=None, block_device_info=None):
         """ Create a new VM and start it."""
         vm = self._lookup(instance.name)
@@ -367,14 +367,14 @@ class HyperVConnection(driver.ComputeDriver):
                     wmi_obj.Properties_.Item(prop).Value
         return newinst
 
-    def reboot(self, instance, network_info):
+    def reboot(self, instance, network_info, reboot_type):
         """Reboot the specified instance."""
         vm = self._lookup(instance.name)
         if vm is None:
             raise exception.InstanceNotFound(instance_id=instance.id)
         self._set_vm_state(instance.name, 'Reboot')
 
-    def destroy(self, instance, network_info, cleanup=True):
+    def destroy(self, instance, network_info, block_device_info=None):
         """Destroy the VM. Also destroy the associated VHD disk files"""
         LOG.debug(_("Got request to destroy vm %s"), instance.name)
         vm = self._lookup(instance.name)
@@ -411,12 +411,12 @@ class HyperVConnection(driver.ComputeDriver):
                 LOG.debug(_("Del: disk %(vhdfile)s vm %(instance_name)s")
                         % locals())
 
-    def get_info(self, instance_id):
+    def get_info(self, instance_name):
         """Get information about the VM"""
-        vm = self._lookup(instance_id)
+        vm = self._lookup(instance_name)
         if vm is None:
-            raise exception.InstanceNotFound(instance_id=instance_id)
-        vm = self._conn.Msvm_ComputerSystem(ElementName=instance_id)[0]
+            raise exception.InstanceNotFound(instance_id=instance_name)
+        vm = self._conn.Msvm_ComputerSystem(ElementName=instance_name)[0]
         vs_man_svc = self._conn.Msvm_VirtualSystemManagementService()[0]
         vmsettings = vm.associators(
                        wmi_result_class='Msvm_VirtualSystemSettingData')
@@ -430,7 +430,7 @@ class HyperVConnection(driver.ComputeDriver):
         numprocs = str(info.NumberOfProcessors)
         uptime = str(info.UpTime)
 
-        LOG.debug(_("Got Info for vm %(instance_id)s: state=%(state)s,"
+        LOG.debug(_("Got Info for vm %(instance_name)s: state=%(state)s,"
                 " mem=%(memusage)s, num_cpu=%(numprocs)s,"
                 " cpu_time=%(uptime)s") % locals())
 
@@ -474,17 +474,26 @@ class HyperVConnection(driver.ComputeDriver):
             LOG.error(msg)
             raise Exception(msg)
 
-    def attach_volume(self, instance_name, device_path, mountpoint):
+    def attach_volume(self, connection_info, instance_name, mountpoint):
         vm = self._lookup(instance_name)
         if vm is None:
             raise exception.InstanceNotFound(instance_id=instance_name)
 
-    def detach_volume(self, instance_name, mountpoint):
+    def detach_volume(self, connection_info, instance_name, mountpoint):
         vm = self._lookup(instance_name)
         if vm is None:
             raise exception.InstanceNotFound(instance_id=instance_name)
+
+    def poll_rebooting_instances(self, timeout):
+        """See xenapi_conn.py implementation."""
+        pass
 
     def poll_rescued_instances(self, timeout):
+        """See xenapi_conn.py implementation."""
+        pass
+
+    def poll_unconfirmed_resizes(self, resize_confirm_window):
+        """See xenapi_conn.py implementation."""
         pass
 
     def update_available_resource(self, ctxt, host):
@@ -505,4 +514,12 @@ class HyperVConnection(driver.ComputeDriver):
 
     def set_host_enabled(self, host, enabled):
         """Sets the specified host's ability to accept new instances."""
+        pass
+
+    def plug_vifs(self, instance, network_info):
+        """Plug VIFs into networks."""
+        pass
+
+    def unplug_vifs(self, instance, network_info):
+        """Unplug VIFs from networks."""
         pass

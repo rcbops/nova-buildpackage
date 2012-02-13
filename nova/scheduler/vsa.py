@@ -25,6 +25,7 @@ from nova import flags
 from nova import log as logging
 from nova import rpc
 from nova import utils
+from nova import exception
 from nova.scheduler import driver
 from nova.scheduler import simple
 from nova.vsa.api import VsaState
@@ -96,7 +97,7 @@ class VsaScheduler(simple.SimpleScheduler):
         return True
 
     def _get_service_states(self):
-        return self.zone_manager.service_states
+        return self.host_manager.service_states
 
     def _filter_hosts(self, topic, request_spec, host_list=None):
 
@@ -129,8 +130,7 @@ class VsaScheduler(simple.SimpleScheduler):
         return filtered_hosts
 
     def _allowed_to_use_host(self, host, selected_hosts, unique):
-        if unique == False or \
-           host not in [item[0] for item in selected_hosts]:
+        if not unique or host not in [item[0] for item in selected_hosts]:
             return True
         else:
             return False
@@ -173,7 +173,7 @@ class VsaScheduler(simple.SimpleScheduler):
                                                             selected_hosts,
                                                             unique)
         if host is None:
-            raise driver.WillNotSchedule(_("No available hosts"))
+            raise exception.NoValidHost(reason=_(""))
 
         return (host, qos_cap)
 
@@ -195,8 +195,6 @@ class VsaScheduler(simple.SimpleScheduler):
             'display_description': vol['description'],
             'volume_type_id': vol['volume_type_id'],
             'metadata': dict(to_vsa_id=vsa_id),
-            'host': vol['host'],
-            'scheduled_at': now
             }
 
         size = vol['size']
@@ -205,12 +203,10 @@ class VsaScheduler(simple.SimpleScheduler):
         LOG.debug(_("Provision volume %(name)s of size %(size)s GB on "\
                     "host %(host)s"), locals())
 
-        volume_ref = db.volume_create(context, options)
-        rpc.cast(context,
-                 db.queue_get_for(context, "volume", vol['host']),
-                 {"method": "create_volume",
-                  "args": {"volume_id": volume_ref['id'],
-                           "snapshot_id": None}})
+        volume_ref = db.volume_create(context.elevated(), options)
+        driver.cast_to_volume_host(context, vol['host'],
+                'create_volume', volume_id=volume_ref['id'],
+                snapshot_id=None)
 
     def _check_host_enforcement(self, context, availability_zone):
         if (availability_zone
@@ -219,8 +215,8 @@ class VsaScheduler(simple.SimpleScheduler):
             zone, _x, host = availability_zone.partition(':')
             service = db.service_get_by_args(context.elevated(), host,
                                              'nova-volume')
-            if not self.service_is_up(service):
-                raise driver.WillNotSchedule(_("Host %s not available") % host)
+            if service['disabled'] or not utils.service_is_up(service):
+                raise exception.WillNotSchedule(host=host)
 
             return host
         else:
@@ -274,7 +270,6 @@ class VsaScheduler(simple.SimpleScheduler):
     def schedule_create_volumes(self, context, request_spec,
                                 availability_zone=None, *_args, **_kwargs):
         """Picks hosts for hosting multiple volumes."""
-
         num_volumes = request_spec.get('num_volumes')
         LOG.debug(_("Attempting to spawn %(num_volumes)d volume(s)") %
                 locals())
@@ -291,7 +286,8 @@ class VsaScheduler(simple.SimpleScheduler):
 
             for vol in volume_params:
                 self._provision_volume(context, vol, vsa_id, availability_zone)
-        except:
+        except Exception:
+            LOG.exception(_("Error creating volumes"))
             if vsa_id:
                 db.vsa_update(context, vsa_id, dict(status=VsaState.FAILED))
 
@@ -310,10 +306,9 @@ class VsaScheduler(simple.SimpleScheduler):
         host = self._check_host_enforcement(context,
                                             volume_ref['availability_zone'])
         if host:
-            now = utils.utcnow()
-            db.volume_update(context, volume_id, {'host': host,
-                                                  'scheduled_at': now})
-            return host
+            driver.cast_to_volume_host(context, host, 'create_volume',
+                    volume_id=volume_id, **_kwargs)
+            return None
 
         volume_type_id = volume_ref['volume_type_id']
         if volume_type_id:
@@ -344,18 +339,16 @@ class VsaScheduler(simple.SimpleScheduler):
 
         try:
             (host, qos_cap) = self._select_hosts(request_spec, all_hosts=hosts)
-        except:
+        except Exception:
+            LOG.exception(_("Error creating volume"))
             if volume_ref['to_vsa_id']:
                 db.vsa_update(context, volume_ref['to_vsa_id'],
                                 dict(status=VsaState.FAILED))
             raise
 
         if host:
-            now = utils.utcnow()
-            db.volume_update(context, volume_id, {'host': host,
-                                                  'scheduled_at': now})
-            self._consume_resource(qos_cap, volume_ref['size'], -1)
-            return host
+            driver.cast_to_volume_host(context, host, 'create_volume',
+                    volume_id=volume_id, **_kwargs)
 
     def _consume_full_drive(self, qos_values, direction):
         qos_values['FullDrive']['NumFreeDrives'] += direction

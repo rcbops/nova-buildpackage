@@ -17,7 +17,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-"""Generic Node baseclass for all workers that run on hosts."""
+"""Generic Node base class for all workers that run on hosts."""
 
 import inspect
 import os
@@ -48,11 +48,22 @@ flags.DEFINE_integer('periodic_interval', 60,
 flags.DEFINE_string('ec2_listen', "0.0.0.0",
                     'IP address for EC2 API to listen')
 flags.DEFINE_integer('ec2_listen_port', 8773, 'port for ec2 api to listen')
-flags.DEFINE_string('osapi_listen', "0.0.0.0",
+flags.DEFINE_string('osapi_compute_listen', "0.0.0.0",
                     'IP address for OpenStack API to listen')
-flags.DEFINE_integer('osapi_listen_port', 8774, 'port for os api to listen')
+flags.DEFINE_integer('osapi_compute_listen_port', 8774,
+                     'list port for osapi compute')
+flags.DEFINE_string('metadata_manager', 'nova.api.manager.MetadataManager',
+                    'OpenStack metadata service manager')
+flags.DEFINE_string('metadata_listen', "0.0.0.0",
+                    'IP address for metadata api to listen')
+flags.DEFINE_integer('metadata_listen_port', 8775,
+                     'port for metadata api to listen')
 flags.DEFINE_string('api_paste_config', "api-paste.ini",
                     'File name for the paste.deploy config for nova-api')
+flags.DEFINE_string('osapi_volume_listen', "0.0.0.0",
+                    'IP address for OpenStack Volume API to listen')
+flags.DEFINE_integer('osapi_volume_listen_port', 8776,
+                     'port for os volume api to listen')
 
 
 class Launcher(object):
@@ -246,13 +257,16 @@ class Service(object):
             except Exception:
                 pass
 
-    def periodic_tasks(self):
+    def periodic_tasks(self, raise_on_error=False):
         """Tasks to be run at a periodic interval."""
-        self.manager.periodic_tasks(context.get_admin_context())
+        ctxt = context.get_admin_context()
+        self.manager.periodic_tasks(ctxt, raise_on_error=raise_on_error)
 
     def report_state(self):
         """Update the state of this service in the datastore."""
         ctxt = context.get_admin_context()
+        zone = FLAGS.node_availability_zone
+        state_catalog = {}
         try:
             try:
                 service_ref = db.service_get(ctxt, self.service_id)
@@ -262,9 +276,12 @@ class Service(object):
                 self._create_service_ref(ctxt)
                 service_ref = db.service_get(ctxt, self.service_id)
 
+            state_catalog['report_count'] = service_ref['report_count'] + 1
+            if zone != service_ref['availability_zone']:
+                state_catalog['availability_zone'] = zone
+
             db.service_update(ctxt,
-                             self.service_id,
-                             {'report_count': service_ref['report_count'] + 1})
+                             self.service_id, state_catalog)
 
             # TODO(termie): make this pattern be more elegant.
             if getattr(self, 'model_disconnected', False):
@@ -290,6 +307,7 @@ class WSGIService(object):
 
         """
         self.name = name
+        self.manager = self._get_manager()
         self.loader = loader or wsgi.Loader()
         self.app = self.loader.load_app(name)
         self.host = getattr(FLAGS, '%s_listen' % name, "0.0.0.0")
@@ -298,6 +316,27 @@ class WSGIService(object):
                                   self.app,
                                   host=self.host,
                                   port=self.port)
+
+    def _get_manager(self):
+        """Initialize a Manager object appropriate for this service.
+
+        Use the service name to look up a Manager subclass from the
+        configuration and initialize an instance. If no class name
+        is configured, just return None.
+
+        :returns: a Manager instance, or None.
+
+        """
+        fl = '%s_manager' % self.name
+        if not fl in FLAGS:
+            return None
+
+        manager_class_name = FLAGS.get(fl, None)
+        if not manager_class_name:
+            return None
+
+        manager_class = utils.import_class(manager_class_name)
+        return manager_class()
 
     def start(self):
         """Start serving this service using loaded configuration.
@@ -308,6 +347,8 @@ class WSGIService(object):
         :returns: None
 
         """
+        if self.manager:
+            self.manager.init_host()
         self.server.start()
         self.port = self.server.port
 
@@ -352,7 +393,13 @@ def wait():
     logging.debug(_('Full set of FLAGS:'))
     for flag in FLAGS:
         flag_get = FLAGS.get(flag, None)
-        logging.debug('%(flag)s : %(flag_get)s' % locals())
+        # hide flag contents from log if contains a password
+        # should use secret flag when switch over to openstack-common
+        if ("_password" in flag or "_key" in flag or
+                (flag == "sql_connection" and "mysql:" in flag_get)):
+            logging.debug('%(flag)s : FLAG SET ' % locals())
+        else:
+            logging.debug('%(flag)s : %(flag_get)s' % locals())
     try:
         _launcher.wait()
     except KeyboardInterrupt:

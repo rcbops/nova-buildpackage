@@ -37,12 +37,11 @@ import urllib
 import routes
 import webob
 
+import nova.api.openstack.wsgi
 from nova import context
 from nova import exception
-from nova import flags
 from nova import utils
 from nova import wsgi
-import nova.api.openstack.wsgi
 
 
 # Global storage for registering modules.
@@ -254,10 +253,10 @@ class Reflection(object):
 
 
 class ServiceWrapper(object):
-    """Wrapper to dynamically povide a WSGI controller for arbitrary objects.
+    """Wrapper to dynamically provide a WSGI controller for arbitrary objects.
 
     With lightweight introspection allows public methods on the object to
-    be accesed via simple WSGI routing and parameters and serializes the
+    be accessed via simple WSGI routing and parameters and serializes the
     return values.
 
     Automatically used be nova.api.direct.Router to wrap registered instances.
@@ -286,7 +285,7 @@ class ServiceWrapper(object):
         params = dict([(str(k), v) for (k, v) in params.iteritems()])
         result = method(context, **params)
 
-        if result is None or type(result) is str or type(result) is unicode:
+        if result is None or isinstance(result, basestring):
             return result
 
         try:
@@ -297,14 +296,14 @@ class ServiceWrapper(object):
             }[content_type]
             return serializer.serialize(result)
         except Exception, e:
-            raise exception.Error(_("Returned non-serializable type: %s")
+            raise exception.Error(_("Returned non-serializeable type: %s")
                                   % result)
 
 
 class Limited(object):
     __notdoc = """Limit the available methods on a given object.
 
-    (Not a docstring so that the docstring can be conditionally overriden.)
+    (Not a docstring so that the docstring can be conditionally overridden.)
 
     Useful when defining a public API that only exposes a subset of an
     internal API.

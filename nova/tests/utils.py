@@ -25,6 +25,31 @@ def get_test_admin_context():
     return nova.context.get_admin_context()
 
 
+def get_test_image_info(context, instance_ref):
+    if not context:
+        context = get_test_admin_context()
+
+    image_ref = instance_ref['image_ref']
+    image_service, image_id = nova.image.get_image_service(context, image_ref)
+    return image_service.show(context, image_id)
+
+
+def get_test_instance_type(context=None):
+    if not context:
+        context = get_test_admin_context()
+
+    test_instance_type = {'name': 'kinda.big',
+                          'memory_mb': 2048,
+                          'vcpus': 4,
+                          'root_gb': 40,
+                          'ephemeral_gb': 80,
+                          'swap': 1024}
+
+    instance_type_ref = nova.db.instance_type_create(context,
+            test_instance_type)
+    return instance_type_ref
+
+
 def get_test_instance(context=None):
     if not context:
         context = get_test_admin_context()
@@ -33,9 +58,10 @@ def get_test_instance(context=None):
                      'basepath': '/some/path',
                      'bridge_name': 'br100',
                      'vcpus': 2,
+                     'root_gb': 10,
                      'project_id': 'fake',
                      'bridge': 'br101',
-                     'image_ref': '1',
+                     'image_ref': 'cedef40a-ed67-4d10-800e-17455edce175',
                      'instance_type_id': '5'}  # m1.small
 
     instance_ref = nova.db.instance_create(context, test_instance)
@@ -59,7 +85,7 @@ def get_test_network_info(count=1):
     mapping = {'mac': fake,
                'dhcp_server': fake,
                'gateway': fake,
-               'gateway6': fake,
+               'gateway_v6': fake,
                'ips': [{'ip': fake_ip}, {'ip': fake_ip}]}
     if ipv6:
         mapping['ip6s'] = [{'ip': fake_ip},

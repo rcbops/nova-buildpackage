@@ -24,17 +24,47 @@ SHOULD include dedicated exception logging.
 
 """
 
-from functools import wraps
+import functools
 import sys
+
+import novaclient.exceptions
+import webob.exc
 
 from nova import log as logging
 
 LOG = logging.getLogger('nova.exception')
 
 
+class ConvertedException(webob.exc.WSGIHTTPException):
+    def __init__(self, code=0, title="", explanation=""):
+        self.code = code
+        self.title = title
+        self.explanation = explanation
+        super(ConvertedException, self).__init__()
+
+
+def novaclient_converter(f):
+    """Convert novaclient ClientException HTTP codes to webob exceptions.
+    Has to be the outer-most decorator.
+    """
+    def new_f(*args, **kwargs):
+        try:
+            ret = f(*args, **kwargs)
+            return ret
+        except novaclient.exceptions.ClientException, e:
+            raise ConvertedException(e.code, e.message, e.details)
+    return new_f
+
+
 class ProcessExecutionError(IOError):
     def __init__(self, stdout=None, stderr=None, exit_code=None, cmd=None,
                  description=None):
+        self.exit_code = exit_code
+        self.stderr = stderr
+        self.stdout = stdout
+        self.cmd = cmd
+        self.description = description
+
         if description is None:
             description = _('Unexpected error while running command.')
         if exit_code is None:
@@ -59,10 +89,6 @@ class ApiError(Error):
         else:
             outstr = '%s' % message
         super(ApiError, self).__init__(outstr)
-
-
-class RebuildRequiresActiveInstance(Error):
-    pass
 
 
 class DBError(Error):
@@ -92,6 +118,8 @@ def wrap_exception(notifier=None, publisher_id=None, event_type=None,
     # TODO(sandy): Find a way to import nova.notifier.api so we don't have
     # to pass it in as a parameter. Otherwise we get a cyclic import of
     # nova.notifier.api -> nova.utils -> nova.exception :(
+    # TODO(johannes): Also, it would be nice to use
+    # utils.save_and_reraise_exception() without an import loop
     def inner(f):
         def wrapped(*args, **kw):
             try:
@@ -121,17 +149,10 @@ def wrap_exception(notifier=None, publisher_id=None, event_type=None,
                     notifier.notify(publisher_id, temp_type, temp_level,
                                     payload)
 
-                if (not isinstance(e, Error) and
-                    not isinstance(e, NovaException)):
-                    #exc_type, exc_value, exc_traceback = sys.exc_info()
-                    LOG.exception(_('Uncaught exception'))
-                    #logging.error(traceback.extract_stack(exc_traceback))
-                    raise Error(str(e))
-
                 # re-raise original exception since it may have been clobbered
                 raise exc_info[0], exc_info[1], exc_info[2]
 
-        return wraps(f)(wrapped)
+        return functools.wraps(f)(wrapped)
     return inner
 
 
@@ -145,17 +166,21 @@ class NovaException(Exception):
     """
     message = _("An unknown exception occurred.")
 
-    def __init__(self, **kwargs):
+    def __init__(self, message=None, **kwargs):
         self.kwargs = kwargs
-        try:
-            self._error_string = self.message % kwargs
+        if not message:
+            try:
+                message = self.message % kwargs
 
-        except Exception:
-            # at least get the core message out if something happened
-            self._error_string = self.message
+            except Exception as e:
+                # at least get the core message out if something happened
+                message = self.message
 
-    def __str__(self):
-        return self._error_string
+        super(NovaException, self).__init__(message)
+
+
+class DecryptionFailure(NovaException):
+    message = _("Failed to decrypt text")
 
 
 class ImagePaginationFailed(NovaException):
@@ -175,27 +200,23 @@ class NotAuthorized(NovaException):
     message = _("Not authorized.")
 
     def __init__(self, *args, **kwargs):
-        super(NotAuthorized, self).__init__(**kwargs)
+        super(NotAuthorized, self).__init__(*args, **kwargs)
 
 
 class AdminRequired(NotAuthorized):
     message = _("User does not have admin privileges")
 
 
-class InstanceBusy(NovaException):
-    message = _("Instance %(instance_id)s is busy. (%(task_state)s)")
-
-
-class InstanceSnapshotting(InstanceBusy):
-    message = _("Instance %(instance_id)s is currently snapshotting.")
-
-
-class InstanceBackingUp(InstanceBusy):
-    message = _("Instance %(instance_id)s is currently being backed up.")
+class PolicyNotAuthorized(NotAuthorized):
+    message = _("Policy doesn't allow %(action)s to be performed.")
 
 
 class Invalid(NovaException):
     message = _("Unacceptable parameters.")
+
+
+class InvalidRequest(Invalid):
+    message = _("The request is invalid.")
 
 
 class InvalidSignature(Invalid):
@@ -215,7 +236,7 @@ class InvalidVolumeType(Invalid):
 
 
 class InvalidPortRange(Invalid):
-    message = _("Invalid port range %(from_port)s:%(to_port)s.")
+    message = _("Invalid port range %(from_port)s:%(to_port)s. %(msg)s")
 
 
 class InvalidIpProtocol(Invalid):
@@ -230,10 +251,19 @@ class InvalidCidr(Invalid):
     message = _("Invalid cidr %(cidr)s.")
 
 
+class InvalidRPCConnectionReuse(Invalid):
+    message = _("Invalid reuse of an RPC connection.")
+
+
 # Cannot be templated as the error syntax varies.
 # msg needs to be constructed when raised.
 class InvalidParameterValue(Invalid):
     message = _("%(err)s")
+
+
+class InstanceInvalidState(Invalid):
+    message = _("Instance %(instance_uuid)s in %(attr)s %(state)s. Cannot "
+                "%(method)s while the instance is in this state.")
 
 
 class InstanceNotRunning(Invalid):
@@ -277,6 +307,10 @@ class UnableToMigrateToSelf(Invalid):
                 "to current host (%(host)s).")
 
 
+class DestinationHostUnavailable(Invalid):
+    message = _("Destination compute host is unavailable at this time.")
+
+
 class SourceHostUnavailable(Invalid):
     message = _("Original compute host is unavailable at this time.")
 
@@ -301,6 +335,10 @@ class InvalidDevicePath(Invalid):
 
 class InvalidCPUInfo(Invalid):
     message = _("Unacceptable CPU info") + ": %(reason)s"
+
+
+class InvalidIpAddressError(Invalid):
+    message = _("%(address)s is not a valid IP v4/6 address.")
 
 
 class InvalidVLANTag(Invalid):
@@ -336,7 +374,7 @@ class NotFound(NovaException):
     message = _("Resource could not be found.")
 
     def __init__(self, *args, **kwargs):
-        super(NotFound, self).__init__(**kwargs)
+        super(NotFound, self).__init__(*args, **kwargs)
 
 
 class FlagNotSet(NotFound):
@@ -382,12 +420,8 @@ class SnapshotNotFound(NotFound):
     message = _("Snapshot %(snapshot_id)s could not be found.")
 
 
-class VolumeIsBusy(Error):
+class VolumeIsBusy(NovaException):
     message = _("deleting volume %(volume_name)s that has snapshot")
-
-
-class ExportDeviceNotFoundForVolume(NotFound):
-    message = _("No export device found for volume %(volume_id)s.")
 
 
 class ISCSITargetNotFoundForVolume(NotFound):
@@ -396,6 +430,10 @@ class ISCSITargetNotFoundForVolume(NotFound):
 
 class DiskNotFound(NotFound):
     message = _("No disk at %(location)s")
+
+
+class VolumeDriverNotFound(NotFound):
+    message = _("Could not find a handler for %(driver_type)s volume.")
 
 
 class InvalidImageRef(Invalid):
@@ -497,10 +535,6 @@ class FixedIpNotFoundForSpecificInstance(FixedIpNotFound):
     message = _("Instance %(instance_id)s doesn't have fixed ip '%(ip)s'.")
 
 
-class FixedIpNotFoundForVirtualInterface(FixedIpNotFound):
-    message = _("Virtual interface %(vif_id)s has zero associated fixed ips.")
-
-
 class FixedIpNotFoundForHost(FixedIpNotFound):
     message = _("Host %(host)s has zero fixed ips.")
 
@@ -530,12 +564,12 @@ class FloatingIpNotFound(NotFound):
     message = _("Floating ip not found for id %(id)s.")
 
 
+class FloatingIpDNSExists(Invalid):
+    message = _("The DNS entry %(name)s already exists in domain %(domain)s.")
+
+
 class FloatingIpNotFoundForAddress(FloatingIpNotFound):
     message = _("Floating ip not found for address %(address)s.")
-
-
-class FloatingIpNotFoundForProject(FloatingIpNotFound):
-    message = _("Floating ip not found for project %(project_id)s.")
 
 
 class FloatingIpNotFoundForHost(FloatingIpNotFound):
@@ -546,16 +580,24 @@ class NoMoreFloatingIps(FloatingIpNotFound):
     message = _("Zero floating ips available.")
 
 
-class FloatingIpAlreadyInUse(NovaException):
-    message = _("Floating ip %(address)s already in use by %(fixed_ip)s.")
+class FloatingIpAssociated(NovaException):
+    message = _("Floating ip %(address)s is associated.")
+
+
+class FloatingIpNotAssociated(NovaException):
+    message = _("Floating ip %(address)s is not associated.")
 
 
 class NoFloatingIpsDefined(NotFound):
     message = _("Zero floating ips exist.")
 
 
+class NoFloatingIpInterface(NotFound):
+    message = _("Interface %(interface)s not found.")
+
+
 class KeypairNotFound(NotFound):
-    message = _("Keypair %(keypair_name)s not found for user %(user_id)s")
+    message = _("Keypair %(name)s not found for user %(user_id)s")
 
 
 class CertificateNotFound(NotFound):
@@ -647,6 +689,10 @@ class ConsoleNotFoundForInstance(ConsoleNotFound):
 class ConsoleNotFoundInPoolForInstance(ConsoleNotFound):
     message = _("Console for instance %(instance_id)s "
                 "in pool %(pool_id)s could not be found.")
+
+
+class ConsoleTypeInvalid(Invalid):
+    message = _("Invalid console type %(console_type)s ")
 
 
 class NoInstanceTypesFound(NotFound):
@@ -792,8 +838,8 @@ class MalformedRequestBody(NovaException):
     message = _("Malformed message body: %(reason)s")
 
 
-class PasteConfigNotFound(NotFound):
-    message = _("Could not find paste config at %(path)s")
+class ConfigNotFound(NotFound):
+    message = _("Could not find config at %(path)s")
 
 
 class PasteAppNotFound(NotFound):
@@ -816,10 +862,6 @@ class CannotResizeToSameSize(NovaException):
     message = _("When resizing, instances must change size!")
 
 
-class CannotResizeToSmallerSize(NovaException):
-    message = _("Resizing to a smaller size is not supported.")
-
-
 class ImageTooLarge(NovaException):
     message = _("Image is larger than instance type allows")
 
@@ -831,5 +873,55 @@ class ZoneRequestError(Error):
         super(ZoneRequestError, self).__init__(message=message)
 
 
+class InstanceTypeMemoryTooSmall(NovaException):
+    message = _("Instance type's memory is too small for requested image.")
+
+
+class InstanceTypeDiskTooSmall(NovaException):
+    message = _("Instance type's disk is too small for requested image.")
+
+
 class InsufficientFreeMemory(NovaException):
     message = _("Insufficient free memory on compute node to start %(uuid)s.")
+
+
+class CouldNotFetchMetrics(NovaException):
+    message = _("Could not fetch bandwidth/cpu/disk metrics for this host.")
+
+
+class NoValidHost(NovaException):
+    message = _("No valid host was found. %(reason)s")
+
+
+class WillNotSchedule(NovaException):
+    message = _("Host %(host)s is not up or doesn't exist.")
+
+
+class QuotaError(ApiError):
+    """Quota Exceeded."""
+    pass
+
+
+class AggregateNotFound(NotFound):
+    message = _("Aggregate %(aggregate_id)s could not be found.")
+
+
+class AggregateNameExists(Duplicate):
+    message = _("Aggregate %(aggregate_name)s already exists.")
+
+
+class AggregateHostNotFound(NotFound):
+    message = _("Aggregate %(aggregate_id)s has no host %(host)s.")
+
+
+class AggregateMetadataNotFound(NotFound):
+    message = _("Aggregate %(aggregate_id)s has no metadata with "
+                "key %(metadata_key)s.")
+
+
+class AggregateHostConflict(Duplicate):
+    message = _("Host %(host)s already member of another aggregate.")
+
+
+class AggregateHostExists(Duplicate):
+    message = _("Aggregate %(aggregate_id)s already has host %(host)s.")

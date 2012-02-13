@@ -77,6 +77,8 @@ The filtering (excluding compute nodes incapable of fulfilling the request) and 
 
 Requesting a new instance
 -------------------------
+(Note: The information below is out of date, as the `nova.compute.api.create_all_at_once()` functionality has merged into `nova.compute.api.create()` and the non-zone aware schedulers have been updated.)
+
 Prior to the `BaseScheduler`, to request a new instance, a call was made to `nova.compute.api.create()`. The type of instance created depended on the value of the `InstanceType` record being passed in. The `InstanceType` determined the amount of disk, CPU, RAM and network required for the instance. Administrators can add new `InstanceType` records to suit their needs. For more complicated instance requests we need to go beyond the default fields in the `InstanceType` table.
 
 `nova.compute.api.create()` performed the following actions:
@@ -162,14 +164,12 @@ All this Zone and Distributed Scheduler stuff can seem a little daunting to conf
 
 ::
 
-  --allow_admin_api=true
   --enable_zone_routing=true
   --zone_name=zone1
   --build_plan_encryption_key=c286696d887c9aa0611bbb3e2025a45b
   --scheduler_driver=nova.scheduler.base_scheduler.BaseScheduler
   --default_host_filter=nova.scheduler.filters.AllHostsFilter
 
-`--allow_admin_api` must be set for OS API to enable the new `/zones/*` commands.
 `--enable_zone_routing` must be set for OS API commands such as `create()`, `pause()` and `delete()` to get routed from Zone to Zone when looking for instances. 
 `--zone_name` is only required in child Zones. The default Zone name is `nova`, but you may want to name your child Zones something useful. Duplicate Zone names are not an issue.
 `build_plan_encryption_key` is the SHA-256 key for encrypting/decrypting the Host information when it leaves a Zone. Be sure to change this key for each Zone you create. Do not duplicate keys.
