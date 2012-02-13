@@ -79,7 +79,7 @@ Depends: ${python:Depends},
  python-simplejson,
  python-lxml,
  python-feedparser,
- python-keystoneclient
+ python-keystoneclient,
  sudo,
  ${misc:Depends}
 Suggests: python-suds (>= 0.4.0),
