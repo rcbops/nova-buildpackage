@@ -1,6 +1,12 @@
+nova (2011.3-d5-rcb14) natty; urgency=low
+
+  * Fix nova_sudoers
+
+ -- RCB Builder <rcb-deploy@lists.rackspace.com>  Fri, 17 Feb 2012 16:59:51 -0600
+
 nova (2011.3-d5-rcb13) natty; urgency=low
 
-  * Change default behavior to send out gratuitous arp on floating assignment 
+  * Change default behavior to send out gratuitous arp on floating assignment
 
  -- RCB Builder <rcb-deploy@lists.rackspace.com>  Wed, 21 Dec 2011 20:00:12 +0000
 
