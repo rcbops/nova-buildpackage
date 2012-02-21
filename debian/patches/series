@@ -1,3 +1,4 @@
+ec2-ip.patch
 ec2fixes.patch
 nova-manage_flagfile_location.patch
 packaged-ajaxterm-calls.patch

@@ -1,3 +1,9 @@
+nova (2012.0+e3-rcb3) natty; urgency=low
+
+  * add patch to address nova bug #901594
+
+ -- RCB Builder <rcb-deploy@lists.rackspace.com>  Tue, 21 Feb 2012 11:35:24 -0600
+
 nova (2012.0+e3-rcb2) natty; urgency=low
 
   * add policy.json to nova-common
