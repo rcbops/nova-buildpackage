@@ -1,0 +1,38 @@
+--- a/nova/compute/manager.py
++++ b/nova/compute/manager.py
+@@ -1506,6 +1506,15 @@
+                                          dest, block_migration)
+             raise
+ 
++        # make a RPC call to the migration destination node to setup
++        # networking
++        for network in self.db.network_get_all_by_instance(context, instance_id):
++           if (network['multi_host']):
++               rpc.cast(context,
++                   self.db.queue_get_for(context, FLAGS.network_topic, dest),
++                   {"method": "_setup_network",
++                   "args": {'network_ref': network}})
++
+         # Executing live migration
+         # live_migration might raises exceptions, but
+         # nothing must be recovered in this version.
+@@ -1594,6 +1603,19 @@
+         if block_migration:
+             self.driver.destroy(instance_ref, network_info)
+ 
++        # make a RPC call to the migration destination node and the source
++        # node to update dnsmasq configuration files
++        for network in self.db.network_get_all_by_instance(ctxt, instance_id):
++           if (network['multi_host']):
++               rpc.cast(ctxt,
++                     self.db.queue_get_for(ctxt, FLAGS.network_topic, dest),
++                         {"method": "_setup_network",
++                          "args": {'network_ref': network}})
++               rpc.cast(ctxt,
++                     self.db.queue_get_for(ctxt, FLAGS.network_topic, self.host),
++                         {"method": "_setup_network",
++                          "args": {'network_ref': network}})
++
+         LOG.info(_('Migrating %(i_name)s to %(dest)s finished successfully.')
+                  % locals())
+         LOG.info(_("You may see the error \"libvirt: QEMU error: "

@@ -1,3 +1,9 @@
+nova (2011.3-final-rcb12) natty; urgency=low
+
+  * fix kvm live migration
+
+ -- RCB Builder <rcb-deploy@lists.rackspace.com>  Mon, 27 Feb 2012 11:35:46 -0600
+
 nova (2011.3-final-rcb11) natty; urgency=low
 
   * Cherry-pick commit 475f3624245500c5382faf5b2708a59fcec2c9ad
