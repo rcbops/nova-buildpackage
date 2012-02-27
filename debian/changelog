@@ -1,3 +1,9 @@
+nova (2011.3-final-rcb13) natty; urgency=low
+
+  * add hairpin patch
+
+ -- RCB Builder <rcb-deploy@lists.rackspace.com>  Mon, 27 Feb 2012 11:44:06 -0600
+
 nova (2011.3-final-rcb12) natty; urgency=low
 
   * fix kvm live migration

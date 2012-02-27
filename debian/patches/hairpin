@@ -1,0 +1,61 @@
+--- a/Authors
++++ b/Authors
+@@ -39,6 +39,7 @@
+ Eldar Nugaev <reldan@oscloud.ru>
+ Eric Day <eday@oddments.org>
+ Eric Windisch <eric@cloudscaling.com>
++Evan Callicoat <diopter@gmail.com>
+ Ewan Mellor <ewan.mellor@citrix.com>
+ Gabe Westmaas <gabe.westmaas@rackspace.com>
+ Hisaharu Ishii <ishii.hisaharu@lab.ntt.co.jp>
+--- a/nova/network/linux_net.py
++++ b/nova/network/linux_net.py
+@@ -396,6 +396,7 @@
+ 
+     iptables_manager.ipv4['nat'].add_rule('POSTROUTING',
+                                           '-s %(range)s -d %(range)s '
++                                          '-m conntrack ! --ctstate DNAT '
+                                           '-j ACCEPT' % \
+                                           {'range': FLAGS.fixed_range})
+     iptables_manager.apply()
+--- a/nova/virt/libvirt/connection.py
++++ b/nova/virt/libvirt/connection.py
+@@ -597,6 +597,17 @@
+     def poll_rescued_instances(self, timeout):
+         pass
+ 
++    def _enable_hairpin(self, instance):
++        interfaces = self.get_interfaces(instance['name'])
++        for interface in interfaces:
++            utils.execute('tee',
++                          '/sys/class/net/%s/brport/hairpin_mode' % interface,
++                          '>',
++                          '/dev/null',
++                          process_input='1',
++                          run_as_root=True,
++                          check_exit_code=[0, 1])
++
+     # NOTE(ilyaalekseyev): Implementation like in multinics
+     # for xenapi(tr3buchet)
+     @exception.wrap_exception()
+@@ -610,6 +621,7 @@
+                            block_device_info=block_device_info)
+ 
+         domain = self._create_new_domain(xml)
++        self._enable_hairpin(instance)
+         LOG.debug(_("instance %s: is running"), instance['name'])
+         self.firewall_driver.apply_instance_filter(instance, network_info)
+ 
+@@ -1256,9 +1268,9 @@
+             for node in ret:
+                 devdst = None
+ 
+-                for child in node.children:
+-                    if child.name == 'target':
+-                        devdst = child.prop('dev')
++                for child in list(node):
++                    if child.tag == 'target':
++                        devdst = child.attrib['dev']
+ 
+                 if devdst is None:
+                     continue

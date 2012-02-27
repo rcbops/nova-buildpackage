@@ -8,3 +8,4 @@ allocate-fixed-ip.patch
 availability_zones.patch
 Fix_RPC_responses_to_allow_None_response_correctly
 fix_kvm_live_migrate
+hairpin
