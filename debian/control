@@ -350,7 +350,6 @@ Description: OpenStack Compute - AJAX console proxy
 Package: nova-xvpvncproxy
 Architecture: all
 Depends: ${ostack-lsb-base}, nova-common (= ${binary:Version}), ${python:Depends}, ${misc:Depends}
-
 Description: OpenStack Compute - XVP VNC proxy
  OpenStack is a reliable cloud infrastructure. Its mission is to produce
  the ubiquitous cloud computing platform that will meet the needs of public
