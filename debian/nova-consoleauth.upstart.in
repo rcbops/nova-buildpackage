@@ -1,4 +1,4 @@
-description "Nova console"
+description "Nova console auth"
 author "Vishvananda Ishaya <vishvananda@gmail.com>"
 
 start on (filesystem and net-device-up IFACE!=lo)
@@ -15,5 +15,5 @@ pre-start script
 	chown nova:root /var/lock/nova/
 end script
 
-exec su -c "nova-console --flagfile=/etc/nova/nova.conf" nova
+exec su -c "nova-consoleauth --flagfile=/etc/nova/nova.conf" nova
 
