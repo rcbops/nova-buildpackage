@@ -1,4 +1,4 @@
-/var/log/nova/nova-vncproxy.log {
+/var/log/nova/nova-consoleauth.log {
     daily
     rotate 10
     size 100M

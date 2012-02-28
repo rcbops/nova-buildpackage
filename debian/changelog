@@ -1,3 +1,9 @@
+nova (2012.0+e3-rcb4) natty; urgency=low
+
+  * add nova-console and nova-consoleauth, properly name nova-xvpvncproxy
+
+ -- RCB Builder <rcb-deploy@lists.rackspace.com>  Mon, 27 Feb 2012 18:38:28 -0600
+
 nova (2012.0+e3-rcb3) natty; urgency=low
 
   * add patch to address nova bug #901594

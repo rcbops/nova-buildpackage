@@ -1,4 +1,4 @@
-description "Nova VNC proxy"
+description "Nova XVPVNC proxy"
 author "Vishvananda Ishaya <vishvananda@gmail.com>"
 
 start on (filesystem and net-device-up IFACE!=lo)
