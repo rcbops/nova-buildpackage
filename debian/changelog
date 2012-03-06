@@ -1,3 +1,9 @@
+nova (2012.0+e3-rcb5) natty; urgency=low
+
+  * add --connection_type flag for libvirt virt types
+
+ -- RCB Builder <rcb-deploy@lists.rackspace.com>  Tue, 06 Mar 2012 08:54:22 -0800
+
 nova (2012.0+e3-rcb4) natty; urgency=low
 
   * add nova-console and nova-consoleauth, properly name nova-xvpvncproxy
