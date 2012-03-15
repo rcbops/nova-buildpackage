@@ -1,3 +1,9 @@
+nova (2012.0+e3-rcb6) natty; urgency=low
+
+  * add ovs-vsctl to sudoers
+
+ -- RCB Builder <rcb-deploy@lists.rackspace.com>  Thu, 15 Mar 2012 13:14:10 -0700
+
 nova (2012.0+e3-rcb5) natty; urgency=low
 
   * add --connection_type flag for libvirt virt types
