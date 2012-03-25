@@ -1,5 +1,7 @@
---- a/Authors
-+++ b/Authors
+Index: nova-buildpackage/Authors
+===================================================================
+--- nova-buildpackage.orig/Authors	2012-03-25 03:55:50.168838064 -0500
++++ nova-buildpackage/Authors	2012-03-25 03:55:55.380875527 -0500
 @@ -39,6 +39,7 @@
  Eldar Nugaev <reldan@oscloud.ru>
  Eric Day <eday@oddments.org>
@@ -8,8 +10,10 @@
  Ewan Mellor <ewan.mellor@citrix.com>
  Gabe Westmaas <gabe.westmaas@rackspace.com>
  Hisaharu Ishii <ishii.hisaharu@lab.ntt.co.jp>
---- a/nova/network/linux_net.py
-+++ b/nova/network/linux_net.py
+Index: nova-buildpackage/nova/network/linux_net.py
+===================================================================
+--- nova-buildpackage.orig/nova/network/linux_net.py	2012-03-25 03:55:43.152787627 -0500
++++ nova-buildpackage/nova/network/linux_net.py	2012-03-25 03:55:55.380875527 -0500
 @@ -396,6 +396,7 @@
  
      iptables_manager.ipv4['nat'].add_rule('POSTROUTING',
@@ -18,8 +22,10 @@
                                            '-j ACCEPT' % \
                                            {'range': FLAGS.fixed_range})
      iptables_manager.apply()
---- a/nova/virt/libvirt/connection.py
-+++ b/nova/virt/libvirt/connection.py
+Index: nova-buildpackage/nova/virt/libvirt/connection.py
+===================================================================
+--- nova-buildpackage.orig/nova/virt/libvirt/connection.py	2012-03-25 03:55:48.100823197 -0500
++++ nova-buildpackage/nova/virt/libvirt/connection.py	2012-03-25 03:55:55.380875527 -0500
 @@ -597,6 +597,17 @@
      def poll_rescued_instances(self, timeout):
          pass
@@ -46,7 +52,7 @@
          LOG.debug(_("instance %s: is running"), instance['name'])
          self.firewall_driver.apply_instance_filter(instance, network_info)
  
-@@ -1256,9 +1268,9 @@
+@@ -1259,9 +1271,9 @@
              for node in ret:
                  devdst = None
  

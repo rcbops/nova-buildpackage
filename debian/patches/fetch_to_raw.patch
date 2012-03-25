@@ -1,0 +1,30 @@
+Index: nova-buildpackage/nova/flags.py
+===================================================================
+--- nova-buildpackage.orig/nova/flags.py	2012-03-25 03:48:09.997530059 -0500
++++ nova-buildpackage/nova/flags.py	2012-03-25 03:52:38.543460576 -0500
+@@ -423,3 +423,5 @@
+         'nova.compute.api:nova.notifier.api.notify_decorator'],
+         'Module list representing monkey '
+         'patched module and decorator')
++
++DEFINE_bool('force_to_raw', False, 'Whether to convert base images to raw')
+Index: nova-buildpackage/nova/virt/libvirt/connection.py
+===================================================================
+--- nova-buildpackage.orig/nova/virt/libvirt/connection.py	2012-03-25 03:48:09.865529110 -0500
++++ nova-buildpackage/nova/virt/libvirt/connection.py	2012-03-25 03:54:01.708058406 -0500
+@@ -778,9 +778,12 @@
+     def _fetch_image(self, context, target, image_id, user_id, project_id,
+                      size=None):
+         """Grab image and optionally attempt to resize it"""
+-        images.fetch_to_raw(context, image_id, target, user_id, project_id)
+-        if size:
+-            disk.extend(target, size)
++        if (FLAGS.force_to_raw):
++            images.fetch_to_raw(context, image_id, target, user_id, project_id)
++            if size:
++                disk.extend(target, size)
++        else:
++            images.fetch(context, image_id, target, user_id, project_id)
+ 
+     def _create_local(self, target, local_size, unit='G', fs_format=None):
+         """Create a blank image of specified size"""
